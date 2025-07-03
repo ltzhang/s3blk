@@ -4,6 +4,14 @@
 
 .PHONY: run clean
 
+# Test programs
+noinst_PROGRAMS = pageserver_test_client
+
+pageserver_test_client_SOURCES = pageserver_test_client.cpp
+pageserver_test_client_CFLAGS = $(WARNINGS_CFLAGS) $(LIBURING_CFLAGS) $(PTHREAD_CFLAGS)
+pageserver_test_client_CPPFLAGS = $(pageserver_test_client_CFLAGS) -I$(top_srcdir)/include -I$(top_srcdir)/targets/pageserver
+pageserver_test_client_LDADD = $(LIBURING_LIBS) $(PTHREAD_LIBS)
+
 run:
 	$(srcdir)/run_test.sh ${T} ${R} ${D}
 

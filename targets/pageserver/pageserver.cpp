@@ -18,8 +18,8 @@
 
 class PageServer {
 private:
-    int server_fd;
-    int backing_fd;
+    int server_socket_fd;
+    int backing_file_fd;
     std::string backing_file;
     std::string listen_addr;
     int listen_port;
@@ -35,10 +35,10 @@ private:
     void log_message(const char *fmt, ...);
 
 public:
-    PageServer() : server_fd(-1), backing_fd(-1), listen_port(8080), verbose(false) {}
+    PageServer() : server_socket_fd(-1), backing_file_fd(-1), listen_port(8080), verbose(false) {}
     ~PageServer() {
-        if (server_fd >= 0) close(server_fd);
-        if (backing_fd >= 0) close(backing_fd);
+        if (server_socket_fd >= 0) close(server_socket_fd);
+        if (backing_file_fd >= 0) close(backing_file_fd);
     }
 
     int parse_args(int argc, char *argv[]);
@@ -98,22 +98,22 @@ int PageServer::parse_args(int argc, char *argv[])
 int PageServer::init()
 {
     // Open backing file
-    backing_fd = open(backing_file.c_str(), O_RDWR | O_CREAT, 0644);
-    if (backing_fd < 0) {
+    backing_file_fd = open(backing_file.c_str(), O_RDWR | O_CREAT, 0644);
+    if (backing_file_fd < 0) {
         std::cerr << "Error: cannot open backing file " << backing_file << ": " << strerror(errno) << std::endl;
         return -1;
     }
 
     // Create server socket
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
+    server_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket_fd < 0) {
         std::cerr << "Error: cannot create socket: " << strerror(errno) << std::endl;
         return -1;
     }
 
     // Set socket options
     int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    if (setsockopt(server_socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         std::cerr << "Error: setsockopt failed: " << strerror(errno) << std::endl;
         return -1;
     }
@@ -129,13 +129,13 @@ int PageServer::init()
         addr.sin_addr.s_addr = inet_addr(listen_addr.c_str());
     }
 
-    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(server_socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         std::cerr << "Error: bind failed: " << strerror(errno) << std::endl;
         return -1;
     }
 
     // Listen for connections
-    if (listen(server_fd, 5) < 0) {
+    if (listen(server_socket_fd, 5) < 0) {
         std::cerr << "Error: listen failed: " << strerror(errno) << std::endl;
         return -1;
     }
@@ -153,7 +153,7 @@ int PageServer::run()
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
         
-        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+        int client_fd = accept(server_socket_fd, (struct sockaddr*)&client_addr, &client_len);
         if (client_fd < 0) {
             std::cerr << "Error: accept failed: " << strerror(errno) << std::endl;
             continue;
@@ -252,7 +252,7 @@ int PageServer::handle_read_request(int client_fd, const struct page_request *re
     }
 
     // Read from backing file
-    ssize_t ret = pread(backing_fd, buffer, req->length, req->offset);
+    ssize_t ret = pread(backing_file_fd, buffer, req->length, req->offset);
     if (ret < 0) {
         delete[] buffer;
         send_response(client_fd, PAGE_RESP_ERROR);
@@ -287,7 +287,7 @@ int PageServer::handle_write_request(int client_fd, const struct page_request *r
     }
 
     // Write to backing file
-    ret = pwrite(backing_fd, buffer, req->length, req->offset);
+    ret = pwrite(backing_file_fd, buffer, req->length, req->offset);
     delete[] buffer;
 
     if (ret < 0) {
@@ -303,7 +303,7 @@ int PageServer::handle_flush_request(int client_fd, const struct page_request *r
 {
     log_message("FLUSH request");
     
-    if (fsync(backing_fd) < 0) {
+    if (fsync(backing_file_fd) < 0) {
         send_response(client_fd, PAGE_RESP_ERROR);
         return -1;
     }
@@ -317,7 +317,7 @@ int PageServer::handle_discard_request(int client_fd, const struct page_request 
     log_message("DISCARD request: offset=%lu, length=%u", req->offset, req->length);
 
     // Use fallocate to punch holes
-    if (fallocate(backing_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 
+    if (fallocate(backing_file_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 
                   req->offset, req->length) < 0) {
         send_response(client_fd, PAGE_RESP_ERROR);
         return -1;
@@ -332,7 +332,7 @@ int PageServer::handle_stat_request(int client_fd, const struct page_request *re
     log_message("STAT request");
 
     struct stat st;
-    if (fstat(backing_fd, &st) < 0) {
+    if (fstat(backing_file_fd, &st) < 0) {
         send_response(client_fd, PAGE_RESP_ERROR);
         return -1;
     }
@@ -358,13 +358,13 @@ void PageServer::log_message(const char *fmt, ...)
 
 void PageServer::cleanup()
 {
-    if (server_fd >= 0) {
-        close(server_fd);
-        server_fd = -1;
+    if (server_socket_fd >= 0) {
+        close(server_socket_fd);
+        server_socket_fd = -1;
     }
-    if (backing_fd >= 0) {
-        close(backing_fd);
-        backing_fd = -1;
+    if (backing_file_fd >= 0) {
+        close(backing_file_fd);
+        backing_file_fd = -1;
     }
 }
 
