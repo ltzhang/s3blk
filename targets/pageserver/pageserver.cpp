@@ -34,11 +34,12 @@ private:
     int handle_stat_request(int client_fd, const struct page_request *req);
     int send_response(int client_fd, uint8_t status, const void *data = nullptr, uint32_t data_len = 0);
     int receive_request(int client_fd, struct page_request *req);
+    bool validate_request(const struct page_request *req);
     void log_message(const char *fmt, ...);
     int create_file_with_size(size_t size);
 
 public:
-    PageServer() : server_socket_fd_(-1), backing_file_fd_(-1), listen_port_(8080), verbose_(false), file_size_(0) {}
+    PageServer() : server_socket_fd_(-1), backing_file_fd_(-1), listen_port_(8964), verbose_(false), file_size_(0) {}
     ~PageServer() {
         if (server_socket_fd_ >= 0) close(server_socket_fd_);
         if (backing_file_fd_ >= 0) close(backing_file_fd_);
@@ -111,7 +112,7 @@ int PageServer::parse_args(int argc, char *argv[])
             std::cout << "Usage: " << argv[0] << " [options]\n"
                       << "Options:\n"
                       << "  -f, --file=FILE    Backing file path (required)\n"
-                      << "  -p, --port=PORT    Listen port (default: 8080)\n"
+                      << "  -p, --port=PORT    Listen port (default: 8964)\n"
                       << "  -a, --addr=ADDR    Listen address (default: 0.0.0.0)\n"
                       << "  -s, --size=SIZE    Create file with given size if file doesn't exist\n"
                       << "                     Size can be specified as: 1024, 1K, 1M, 1G, etc.\n"
@@ -243,8 +244,22 @@ int PageServer::run()
 
             // Validate request
             if (req.magic != PAGESERVER_MAGIC || req.version != PAGESERVER_VERSION) {
-                send_response(client_fd, PAGE_RESP_ERROR);
-                continue;
+                if (send_response(client_fd, PAGE_RESP_ERROR) < 0) {
+                    log_message("Failed to send magic/version error response");
+                    break;
+                }
+                log_message("Closing connection due to protocol error");
+                break;
+            }
+
+            // Validate request parameters
+            if (!validate_request(&req)) {
+                if (send_response(client_fd, PAGE_RESP_ERROR) < 0) {
+                    log_message("Failed to send validation error response");
+                    break;
+                }
+                log_message("Closing connection due to validation error");
+                break;
             }
 
             // Handle request based on command
@@ -265,7 +280,11 @@ int PageServer::run()
                 handle_stat_request(client_fd, &req);
                 break;
             default:
-                send_response(client_fd, PAGE_RESP_ERROR);
+                if (send_response(client_fd, PAGE_RESP_ERROR) < 0) {
+                    log_message("Failed to send invalid command error response");
+                    break;
+                }
+                log_message("Closing connection due to invalid command");
                 break;
             }
         }
@@ -285,6 +304,27 @@ int PageServer::receive_request(int client_fd, struct page_request *req)
     return 0;
 }
 
+bool PageServer::validate_request(const struct page_request *req)
+{
+    // For commands that use offset/length, validate bounds
+    if (req->cmd == PAGE_CMD_READ || req->cmd == PAGE_CMD_WRITE || req->cmd == PAGE_CMD_DISCARD) {
+        // Check for overflow in offset + length
+        if (req->length > 0 && req->offset + req->length < req->offset) {
+            log_message("Request offset + length overflow: %lu + %u", req->offset, req->length);
+            return false;
+        }
+        
+        // Check if request extends beyond file size
+        if (req->offset + req->length > file_size_) {
+            log_message("Request extends beyond file size: %lu + %u > %zu", 
+                       req->offset, req->length, file_size_);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
 int PageServer::send_response(int client_fd, uint8_t status, const void *data, uint32_t data_len)
 {
     struct page_response resp;
@@ -296,6 +336,11 @@ int PageServer::send_response(int client_fd, uint8_t status, const void *data, u
     // Send response header
     ssize_t ret = send(client_fd, &resp, sizeof(resp), MSG_NOSIGNAL);
     if (ret != sizeof(resp)) {
+        if (ret < 0) {
+            log_message("Failed to send response header: %s", strerror(errno));
+        } else {
+            log_message("Incomplete response header sent: %zd != %zu", ret, sizeof(resp));
+        }
         return -1;
     }
 
@@ -303,6 +348,11 @@ int PageServer::send_response(int client_fd, uint8_t status, const void *data, u
     if (data && data_len > 0) {
         ret = send(client_fd, data, data_len, MSG_NOSIGNAL);
         if (ret != (ssize_t)data_len) {
+            if (ret < 0) {
+                log_message("Failed to send response data: %s", strerror(errno));
+            } else {
+                log_message("Incomplete response data sent: %zd != %u", ret, data_len);
+            }
             return -1;
         }
     }

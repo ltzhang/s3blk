@@ -53,4 +53,5 @@ Makefile.in
 test_file_*.dat
 server.log
 *.log
-/tests/pageserver_test_client
+tests/pageserver_test_client
+tests/pageserver_test_client
