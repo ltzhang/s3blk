@@ -48,3 +48,9 @@ Makefile.in
 /pageserver*
 /ublksrv.pc
 /doc/html
+
+# Ignore test-generated files and logs
+test_file_*.dat
+server.log
+*.log
+/tests/pageserver_test_client

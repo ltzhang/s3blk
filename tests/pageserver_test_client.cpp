@@ -56,28 +56,6 @@ private:
         fflush(stdout);
     }
 
-    int connect_to_server() {
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) {
-            perror("socket");
-            return -1;
-        }
-
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(server_port);
-        addr.sin_addr.s_addr = inet_addr(server_host.c_str());
-
-        if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            perror("connect");
-            close(sock);
-            return -1;
-        }
-
-        return sock;
-    }
-
     int send_request(uint8_t cmd, uint64_t offset, uint32_t length, const void *data = nullptr) {
         struct page_request req;
         req.magic = PAGESERVER_MAGIC;
@@ -155,12 +133,26 @@ public:
         }
     }
 
-    int connect() {
-        client_fd = connect_to_server();
-        if (client_fd < 0) {
-            log_message("Failed to connect to server %s:%d", server_host.c_str(), server_port);
+    int connect_to_server() {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) {
+            perror("socket");
             return -1;
         }
+
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(server_port);
+        addr.sin_addr.s_addr = inet_addr(server_host.c_str());
+
+        if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            perror("connect");
+            close(sock);
+            return -1;
+        }
+
+        client_fd = sock;
         log_message("Connected to server %s:%d", server_host.c_str(), server_port);
         return 0;
     }
@@ -731,7 +723,7 @@ int main(int argc, char *argv[]) {
 
     PageServerTestClient client(host, port, verbose);
     
-    if (client.connect() != 0) {
+    if (client.connect_to_server() != 0) {
         std::cerr << "Failed to connect to server" << std::endl;
         return 1;
     }
