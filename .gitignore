@@ -45,5 +45,6 @@ Makefile.in
 /tests/tmp/
 /ublk
 /ublk.*
+/pageserver
 /ublksrv.pc
 /doc/html

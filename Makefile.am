@@ -14,7 +14,7 @@ AM_CXXFLAGS = -std=c++20 -Wunused
 TGT_DIR = targets
 TGT_INC = $(top_srcdir)/$(TGT_DIR)/include
 
-sbin_PROGRAMS = ublk ublk.null ublk.loop ublk.nbd ublk_user_id
+sbin_PROGRAMS = ublk ublk.null ublk.loop ublk.nbd ublk_user_id ublk.cached_loop pageserver
 noinst_PROGRAMS = demo_null demo_event
 dist_sbin_SCRIPTS = utils/ublk_chown.sh utils/ublk_chown_docker.sh
 
@@ -56,6 +56,16 @@ ublk_nfs_SOURCES = $(TGT_DIR)/ublk.nfs.cpp $(TGT_DIR)/ublksrv_tgt.cpp
 ublk_nfs_CFLAGS = $(WARNINGS_CFLAGS) $(LIBURING_CFLAGS) $(PTHREAD_CFLAGS)
 ublk_nfs_CPPFLAGS = $(ublk_nfs_CFLAGS) -I$(top_srcdir)/include -I$(TGT_INC)
 ublk_nfs_LDADD = lib/libublksrv.la $(LIBURING_LIBS) $(PTHREAD_LIBS) -lnfs
+
+ublk_cached_loop_SOURCES = $(TGT_DIR)/ublk.cached_loop.cpp $(TGT_DIR)/ublksrv_tgt.cpp $(TGT_DIR)/cache/cache_manager.cpp
+ublk_cached_loop_CFLAGS = $(WARNINGS_CFLAGS) $(LIBURING_CFLAGS) $(PTHREAD_CFLAGS)
+ublk_cached_loop_CPPFLAGS = $(ublk_cached_loop_CFLAGS) -I$(top_srcdir)/include -I$(TGT_INC) -I$(TGT_DIR)/cache
+ublk_cached_loop_LDADD = lib/libublksrv.la $(LIBURING_LIBS) $(PTHREAD_LIBS)
+
+pageserver_SOURCES = $(TGT_DIR)/pageserver/pageserver.cpp
+pageserver_CFLAGS = $(WARNINGS_CFLAGS) $(LIBURING_CFLAGS) $(PTHREAD_CFLAGS)
+pageserver_CPPFLAGS = $(pageserver_CFLAGS) -I$(top_srcdir)/include -I$(TGT_INC) -I$(TGT_DIR)/pageserver
+pageserver_LDADD = lib/libublksrv.la $(LIBURING_LIBS) $(PTHREAD_LIBS)
 
 demo_null_SOURCES = demo_null.c
 demo_null_CFLAGS = $(WARNINGS_CFLAGS) $(LIBURING_CFLAGS) $(PTHREAD_CFLAGS)

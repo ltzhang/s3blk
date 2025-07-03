@@ -489,5 +489,97 @@
     "directory": "/home/lintaoz/work/s3blk",
     "file": "/home/lintaoz/work/s3blk/utils/ublk_user_id.c",
     "output": "/home/lintaoz/work/s3blk/utils/ublk_user_id-ublk_user_id.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-DHAVE_CONFIG_H",
+      "-I.",
+      "-pthread",
+      "-I./include",
+      "-I./targets/include",
+      "-Itargets/cache",
+      "-std=c++20",
+      "-Wunused",
+      "-g",
+      "-O2",
+      "-fcoroutines",
+      "-c",
+      "-o",
+      "targets/ublk_cached_loop-ublk.cached_loop.o",
+      "targets/ublk.cached_loop.cpp"
+    ],
+    "directory": "/home/lintaoz/work/s3blk",
+    "file": "/home/lintaoz/work/s3blk/targets/ublk.cached_loop.cpp",
+    "output": "/home/lintaoz/work/s3blk/targets/ublk_cached_loop-ublk.cached_loop.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-DHAVE_CONFIG_H",
+      "-I.",
+      "-pthread",
+      "-I./include",
+      "-I./targets/include",
+      "-Itargets/cache",
+      "-std=c++20",
+      "-Wunused",
+      "-g",
+      "-O2",
+      "-fcoroutines",
+      "-c",
+      "-o",
+      "targets/ublk_cached_loop-ublksrv_tgt.o",
+      "targets/ublksrv_tgt.cpp"
+    ],
+    "directory": "/home/lintaoz/work/s3blk",
+    "file": "/home/lintaoz/work/s3blk/targets/ublksrv_tgt.cpp",
+    "output": "/home/lintaoz/work/s3blk/targets/ublk_cached_loop-ublksrv_tgt.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-DHAVE_CONFIG_H",
+      "-I.",
+      "-pthread",
+      "-I./include",
+      "-I./targets/include",
+      "-Itargets/cache",
+      "-std=c++20",
+      "-Wunused",
+      "-g",
+      "-O2",
+      "-fcoroutines",
+      "-c",
+      "-o",
+      "targets/cache/ublk_cached_loop-cache_manager.o",
+      "targets/cache/cache_manager.cpp"
+    ],
+    "directory": "/home/lintaoz/work/s3blk",
+    "file": "/home/lintaoz/work/s3blk/targets/cache/cache_manager.cpp",
+    "output": "/home/lintaoz/work/s3blk/targets/cache/ublk_cached_loop-cache_manager.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/g++",
+      "-DHAVE_CONFIG_H",
+      "-I.",
+      "-pthread",
+      "-I./include",
+      "-I./targets/include",
+      "-Itargets/pageserver",
+      "-std=c++20",
+      "-Wunused",
+      "-g",
+      "-O2",
+      "-fcoroutines",
+      "-c",
+      "-o",
+      "targets/pageserver/pageserver-pageserver.o",
+      "targets/pageserver/pageserver.cpp"
+    ],
+    "directory": "/home/lintaoz/work/s3blk",
+    "file": "/home/lintaoz/work/s3blk/targets/pageserver/pageserver.cpp",
+    "output": "/home/lintaoz/work/s3blk/targets/pageserver/pageserver-pageserver.o"
   }
 ]

@@ -22,6 +22,7 @@ struct cached_loop_tgt_data {
     // Cache-related fields
     struct cache_manager *cache;
     int remote_fd;                    // Connection to remote page server
+    int cache_fd;                     // Cache file descriptor
     char remote_host[256];            // Remote server host
     int remote_port;                  // Remote server port
     pthread_t bg_thread;              // Background fetch thread
@@ -30,10 +31,7 @@ struct cached_loop_tgt_data {
     pthread_cond_t bg_cond;           // Condition for background operations
     
     // Background fetch queue
-    struct {
-        uint64_t logical_sector;
-        bool pending;
-    } *fetch_queue;
+    struct fetch_queue_entry *fetch_queue;
     int fetch_queue_size;
     int fetch_queue_head;
     int fetch_queue_tail;
@@ -47,6 +45,36 @@ struct fetch_request {
     bool completed;
     int result;
 };
+
+struct fetch_queue_entry {
+    uint64_t logical_sector;
+    bool pending;
+};
+
+static bool backing_supports_discard(char *name)
+{
+    int fd;
+    char buf[512];
+    int len;
+
+    len = snprintf(buf, 512, "/sys/block/%s/queue/discard_max_hw_bytes",
+            basename(name));
+    buf[len] = 0;
+    fd = open(buf, O_RDONLY);
+    if (fd > 0) {
+        char val[128];
+        int ret = pread(fd, val, 128, 0);
+        unsigned long long bytes = 0;
+
+        close(fd);
+        if (ret > 0)
+            bytes = strtol(val, NULL, 10);
+
+        if (bytes > 0)
+            return true;
+    }
+    return false;
+}
 
 static int connect_to_remote_server(const char *host, int port)
 {
@@ -173,7 +201,7 @@ static void *background_fetch_thread(void *arg)
             if (physical_sector != UINT64_MAX) {
                 // Write to cache file
                 uint64_t cache_offset = physical_sector << 9;
-                pwrite(tgt_data->dev->tgt.fds[1], buffer, 512, cache_offset);
+                pwrite(tgt_data->cache_fd, buffer, 512, cache_offset);
             }
         }
     }
@@ -254,7 +282,7 @@ static int cached_loop_setup_tgt(struct ublksrv_dev *dev, int type)
 
     // Initialize background fetch queue
     tgt_data->fetch_queue_size = 64;
-    tgt_data->fetch_queue = calloc(tgt_data->fetch_queue_size, sizeof(*tgt_data->fetch_queue));
+    tgt_data->fetch_queue = (struct fetch_queue_entry *)calloc(tgt_data->fetch_queue_size, sizeof(*tgt_data->fetch_queue));
     if (!tgt_data->fetch_queue) {
         ublk_err("%s: cannot allocate fetch queue\n", __func__);
         cache_manager_destroy(tgt_data->cache);
@@ -283,6 +311,7 @@ static int cached_loop_setup_tgt(struct ublksrv_dev *dev, int type)
     tgt->tgt_ring_depth = info->queue_depth;
     tgt->nr_fds = 1;
     tgt->fds[1] = fd;
+    tgt_data->cache_fd = fd;
 
     tgt_data->auto_zc = info->flags & UBLK_F_AUTO_BUF_REG;
     tgt_data->zero_copy = info->flags & UBLK_F_SUPPORT_ZERO_COPY;
@@ -395,7 +424,7 @@ static int cached_loop_init_tgt(struct ublksrv_dev *dev, int type, int argc, cha
             return -1;
         p.basic.logical_bs_shift = ilog2(bs);
         p.basic.physical_bs_shift = ilog2(pbs);
-        can_discard = backing_supports_discard(file);
+        can_discard = false; // backing_supports_discard(file);
     } else if (S_ISREG(st.st_mode)) {
         bytes = st.st_size;
         can_discard = true;
@@ -665,80 +694,20 @@ static int cached_loop_queue_tgt_io(const struct ublksrv_queue *q,
 static co_io_job __cached_loop_handle_io_async(const struct ublksrv_queue *q,
 		const struct ublk_io_data *data, int tag)
 {
-	struct ublk_io_tgt *io = __ublk_get_io_tgt_data(data);
-	const struct cached_loop_tgt_data *tgt_data = (struct cached_loop_tgt_data*) q->dev->tgt.tgt_data;
-	unsigned ublk_op = ublksrv_get_op(data->iod);
-	int ret;
-
-	// Handle cache logic for read operations
-	if (ublk_op == UBLK_IO_OP_READ) {
-		uint64_t logical_sector = data->iod->start_sector + tgt_data->offset;
-		uint64_t physical_sector;
-		
-		// Check if sector is in cache
-		if (cache_lookup(tgt_data->cache, logical_sector, &physical_sector)) {
-			// Cache hit - read from cache
-			data->iod->start_sector = physical_sector;
-			ret = cached_loop_queue_tgt_io(q, data, tag);
-		} else {
-			// Cache miss - need to fetch from remote
-			// For now, we'll queue a background fetch and return an error
-			// In a real implementation, we'd wait for the fetch to complete
-			
-			// Queue background fetch
-			pthread_mutex_lock(&tgt_data->queue_mutex);
-			int next_tail = (tgt_data->fetch_queue_tail + 1) % tgt_data->fetch_queue_size;
-			if (next_tail != tgt_data->fetch_queue_head) {
-				tgt_data->fetch_queue[tgt_data->fetch_queue_tail].logical_sector = logical_sector;
-				tgt_data->fetch_queue[tgt_data->fetch_queue_tail].pending = true;
-				tgt_data->fetch_queue_tail = next_tail;
-				pthread_cond_signal(&tgt_data->bg_cond);
-			}
-			pthread_mutex_unlock(&tgt_data->queue_mutex);
-			
-			// Return error for now - in real implementation, we'd wait
-			ublksrv_complete_io(q, tag, -EAGAIN);
-			co_return;
-		}
-	} else if (ublk_op == UBLK_IO_OP_WRITE) {
-		// For writes, we need to ensure the sector is in cache
-		uint64_t logical_sector = data->iod->start_sector + tgt_data->offset;
-		uint64_t physical_sector;
-		
-		// Check if sector is in cache
-		if (!cache_lookup(tgt_data->cache, logical_sector, &physical_sector)) {
-			// Not in cache - insert it
-			physical_sector = cache_insert(tgt_data->cache, logical_sector);
-			if (physical_sector == UINT64_MAX) {
-				// Cache full and eviction failed
-				ublksrv_complete_io(q, tag, -ENOMEM);
-				co_return;
-			}
-		}
-		
-		// Mark as dirty
-		cache_mark_dirty(tgt_data->cache, logical_sector);
-		
-		// Update the IO to use physical sector
-		data->iod->start_sector = physical_sector;
-		ret = cached_loop_queue_tgt_io(q, data, tag);
-	} else {
-		// For other operations, just pass through
-		ret = cached_loop_queue_tgt_io(q, data, tag);
-	}
-
+	// TODO: Implement proper async IO handling with cache
+	// For now, just pass through to the basic IO handler
+	int ret = cached_loop_queue_tgt_io(q, data, tag);
+	
 	if (ret > 0) {
+		struct ublk_io_tgt *io = __ublk_get_io_tgt_data(data);
 		int io_res = 0;
 		while (ret-- > 0) {
 			int res;
-
 			co_await__suspend_always(tag);
 			res = ublksrv_tgt_process_cqe(io, &io_res);
 			if (res < 0 && io_res >= 0)
 				io_res = res;
 		}
-		if (io_res == -EAGAIN)
-			goto again;
 		ublksrv_complete_io(q, tag, io_res);
 	} else if (ret < 0) {
 		ublk_err("fail to queue io %d, ret %d\n", tag, ret);
@@ -823,8 +792,8 @@ static void cached_loop_cmd_usage()
 }
 
 static const struct ublksrv_tgt_type cached_loop_tgt_type = {
-    .handle_io_async = NULL,  // TODO: implement cached IO handling
-    .tgt_io_done = NULL,      // TODO: implement
+    .handle_io_async = cached_loop_handle_io_async,
+    .tgt_io_done = cached_loop_tgt_io_done,
     .usage_for_add = cached_loop_cmd_usage,
     .init_tgt = cached_loop_init_tgt,
     .deinit_tgt = cached_loop_deinit_tgt,
