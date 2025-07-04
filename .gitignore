@@ -55,3 +55,4 @@ server.log
 *.log
 tests/pageserver_test_client
 tests/pageserver_test_client
+example_usage

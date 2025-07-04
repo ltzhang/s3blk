@@ -20,7 +20,7 @@ struct cached_loop_tgt_data {
     unsigned long offset;
     
     // Cache-related fields
-    struct cache_manager *cache;
+    TemplateCacheManager<uint64_t, uint64_t, LRU> *cache;
     int remote_fd;                    // Connection to remote page server
     int cache_fd;                     // Cache file descriptor
     char remote_host[256];            // Remote server host
@@ -196,9 +196,9 @@ static void *background_fetch_thread(void *arg)
         int ret = fetch_sector_from_remote(tgt_data, logical_sector, buffer);
         
         if (ret == 0) {
-            // Insert into cache
-            uint64_t physical_sector = cache_insert(tgt_data->cache, logical_sector);
-            if (physical_sector != UINT64_MAX) {
+            // Insert into cache - use logical_sector as both key and value for now
+            uint64_t physical_sector = tgt_data->cache->insert(logical_sector, logical_sector);
+            if (physical_sector != 0) {  // Check for valid return value
                 // Write to cache file
                 uint64_t cache_offset = physical_sector << 9;
                 pwrite(tgt_data->cache_fd, buffer, 512, cache_offset);
@@ -272,7 +272,7 @@ static int cached_loop_setup_tgt(struct ublksrv_dev *dev, int type)
 
     // Initialize cache manager
     uint64_t cache_size_sectors = 1024;  // Default 512KB cache
-    tgt_data->cache = cache_manager_create(cache_size_sectors, EVICTION_LRU);
+    tgt_data->cache = new TemplateCacheManager<uint64_t, uint64_t, LRU>(cache_size_sectors);
     if (!tgt_data->cache) {
         ublk_err("%s: cannot create cache manager\n", __func__);
         close(tgt_data->remote_fd);
@@ -285,7 +285,7 @@ static int cached_loop_setup_tgt(struct ublksrv_dev *dev, int type)
     tgt_data->fetch_queue = (struct fetch_queue_entry *)calloc(tgt_data->fetch_queue_size, sizeof(*tgt_data->fetch_queue));
     if (!tgt_data->fetch_queue) {
         ublk_err("%s: cannot allocate fetch queue\n", __func__);
-        cache_manager_destroy(tgt_data->cache);
+        delete tgt_data->cache;
         close(tgt_data->remote_fd);
         close(fd);
         return -1;
@@ -300,7 +300,7 @@ static int cached_loop_setup_tgt(struct ublksrv_dev *dev, int type)
     if (pthread_create(&tgt_data->bg_thread, NULL, background_fetch_thread, tgt_data) != 0) {
         ublk_err("%s: cannot create background thread\n", __func__);
         free(tgt_data->fetch_queue);
-        cache_manager_destroy(tgt_data->cache);
+        delete tgt_data->cache;
         close(tgt_data->remote_fd);
         close(fd);
         return -1;
@@ -761,7 +761,7 @@ static void cached_loop_deinit_tgt(const struct ublksrv_dev *dev)
         
         // Cleanup
         if (tgt_data->cache) {
-            cache_manager_destroy(tgt_data->cache);
+            delete tgt_data->cache;
         }
         
         if (tgt_data->fetch_queue) {

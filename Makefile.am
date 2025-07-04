@@ -57,7 +57,7 @@ ublk_nfs_CFLAGS = $(WARNINGS_CFLAGS) $(LIBURING_CFLAGS) $(PTHREAD_CFLAGS)
 ublk_nfs_CPPFLAGS = $(ublk_nfs_CFLAGS) -I$(top_srcdir)/include -I$(TGT_INC)
 ublk_nfs_LDADD = lib/libublksrv.la $(LIBURING_LIBS) $(PTHREAD_LIBS) -lnfs
 
-ublk_cached_loop_SOURCES = $(TGT_DIR)/ublk.cached_loop.cpp $(TGT_DIR)/ublksrv_tgt.cpp $(TGT_DIR)/cache/cache_manager.cpp
+ublk_cached_loop_SOURCES = $(TGT_DIR)/ublk.cached_loop.cpp $(TGT_DIR)/ublksrv_tgt.cpp
 ublk_cached_loop_CFLAGS = $(WARNINGS_CFLAGS) $(LIBURING_CFLAGS) $(PTHREAD_CFLAGS)
 ublk_cached_loop_CPPFLAGS = $(ublk_cached_loop_CFLAGS) -I$(top_srcdir)/include -I$(TGT_INC) -I$(TGT_DIR)/cache
 ublk_cached_loop_LDADD = lib/libublksrv.la $(LIBURING_LIBS) $(PTHREAD_LIBS)
