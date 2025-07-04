@@ -13,6 +13,10 @@
 #include <iostream>
 #include <cassert>
 
+// Forward declaration
+template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
+class TemplateCacheManager;
+
 // Base entry for all policies - templated on Key and Value types
 template<typename Key, typename Value>
 struct CacheEntry {
@@ -30,6 +34,8 @@ struct CacheEntry {
     CacheEntry(const Key& k, const Value& v, uint32_t idx)
         : key(k), value(v), dirty(false), valid(true), index(idx), pin_count(0) {}
 };
+
+// Base policy interface - removed for now as we're keeping static functions
 
 // ===================== LRU Policy =====================
 template<typename Key, typename Value>
@@ -297,11 +303,11 @@ template<typename Key, typename Value>
 class CLOCK {
 public:
     struct Entry : public CacheEntry<Key, Value> {
-        int next;
+        int next, prev;
         bool reference_bit;
-        Entry() : CacheEntry<Key, Value>(), next(-1), reference_bit(false) {}
+        Entry() : CacheEntry<Key, Value>(), next(-1), prev(-1), reference_bit(false) {}
         Entry(const Key& k, const Value& v, uint32_t idx) 
-            : CacheEntry<Key, Value>(k, v, idx), next(-1), reference_bit(true) {}
+            : CacheEntry<Key, Value>(k, v, idx), next(-1), prev(-1), reference_bit(true) {}
     };
     
     struct ManagerData {
@@ -318,77 +324,44 @@ public:
     
     static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
         if (m.hand == -1) {
+            // First entry
             m.hand = e.index;
             m.tail = e.index;
             e.next = e.index;
+            e.prev = e.index;
         } else {
-            // Insert after tail for O(1) operation
+            // Insert after tail
             entries[m.tail].next = e.index;
+            e.prev = m.tail;
             e.next = m.hand;
+            entries[m.hand].prev = e.index;
             m.tail = e.index;
         }
     }
     
     static void on_remove(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
-        // Sanity check: traverse the circular list from m.hand and validate structure
-        if (m.hand != -1) {
-            int count = 0;
-            int idx = m.hand;
-            bool found = false;
-            int max_iters = entries.size() + 1; // +1 for circular
-            std::vector<bool> visited(entries.size(), false);
-            do {
-                if (idx < 0 || idx >= (int)entries.size()) {
-                    std::cerr << "[CLOCK::on_remove] Invalid next pointer: " << idx << "\n";
-                    return;
-                }
-                if (visited[idx]) {
-                    std::cerr << "[CLOCK::on_remove] Cycle detected at " << idx << "\n";
-                    return;
-                }
-                visited[idx] = true;
-                if ((int)e.index == idx) found = true;
-                idx = entries[idx].next;
-                count++;
-                if (count > max_iters) {
-                    std::cerr << "[CLOCK::on_remove] Exceeded max iterations, possible infinite loop\n";
-                    return;
-                }
-            } while (idx != m.hand);
-            if (!found) {
-                std::cerr << "[CLOCK::on_remove] Entry to remove (index " << e.index << ") not found in CLOCK list\n";
-                return;
-            }
-        }
         if (e.next == e.index) {
             // Only one entry, remove it
             m.hand = -1;
             m.tail = -1;
         } else {
-            // Find previous entry with safety check to prevent infinite loop
-            int prev = m.hand;
-            int start = prev;
-            do {
-                if (entries[prev].next == e.index) break;
-                prev = entries[prev].next;
-            } while (prev != start);
-            
-            // If we didn't find the entry, something is wrong with the list structure
-            assert (entries[prev].next == e.index); 
-            entries[prev].next = e.next;
-            
-            // Update hand and tail pointers
+            // O(1) removal using prev pointer
+            entries[e.prev].next = e.next;
+            entries[e.next].prev = e.prev;
+            // Update hand and tail pointers if needed
             if (m.hand == (int)e.index) m.hand = e.next;
-            if (m.tail == (int)e.index) m.tail = prev;
+            if (m.tail == (int)e.index) m.tail = e.prev;
+            // If after removal, hand or tail points to an invalid entry, advance to next valid
+            // (should not happen if only valid entries are in the list)
         }
-        e.next = -1;
+        e.next = e.prev = -1;
     }
     
     static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
-        // CLOCK: walk the clock - optimized single pass
+        // CLOCK: walk the clock - up to two full passes
         if (m.hand == -1) return nullptr;
         int start = m.hand;
-        
+        int pass = 0;
         do {
             Entry& entry = entries[m.hand];
             if (can_evict(entry)) {
@@ -403,8 +376,11 @@ public:
                 }
             }
             m.hand = entry.next;
-        } while (m.hand != start);
-        
+            if (m.hand == start) {
+                pass++;
+                if (pass == 2) break;
+            }
+        } while (true);
         return nullptr;
     }
     
@@ -440,15 +416,16 @@ template<typename Key, typename Value>
 class SIEVE {
 public:
     struct Entry : public CacheEntry<Key, Value> {
-        int next;
+        int next, prev;
         bool visited;
-        Entry() : CacheEntry<Key, Value>(), next(-1), visited(false) {}
+        Entry() : CacheEntry<Key, Value>(), next(-1), prev(-1), visited(false) {}
         Entry(const Key& k, const Value& v, uint32_t idx) 
-            : CacheEntry<Key, Value>(k, v, idx), next(-1), visited(true) {}
+            : CacheEntry<Key, Value>(k, v, idx), next(-1), prev(-1), visited(true) {}
     };
     
     struct ManagerData {
         int hand = -1;
+        int tail = -1;  // Add tail pointer for O(1) inserts
     };
     
     using EntryType = Entry;
@@ -460,59 +437,43 @@ public:
     
     static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
         if (m.hand == -1) {
+            // First entry
             m.hand = e.index;
+            m.tail = e.index;
             e.next = e.index;
+            e.prev = e.index;
         } else {
-            // Find tail with safety check to prevent infinite loop
-            int tail = m.hand;
-            int start = tail;
-            do {
-                if (entries[tail].next == m.hand) break;
-                tail = entries[tail].next;
-            } while (tail != start);
-            
-            // If we didn't find the tail, something is wrong with the list structure
-            if (entries[tail].next != m.hand) {
-                // List corruption detected - try to recover by resetting
-                m.hand = e.index;
-                e.next = e.index;
-                return;
-            }
-            
-            entries[tail].next = e.index;
+            // Insert after tail for O(1) operation
+            entries[m.tail].next = e.index;
+            e.prev = m.tail;
             e.next = m.hand;
+            entries[m.hand].prev = e.index;
+            m.tail = e.index;
         }
     }
     
     static void on_remove(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
         if (e.next == e.index) {
+            // Only one entry, remove it
             m.hand = -1;
+            m.tail = -1;
         } else {
-            // Find previous entry with safety check to prevent infinite loop
-            int prev = m.hand;
-            int start = prev;
-            do {
-                if (entries[prev].next == e.index) break;
-                prev = entries[prev].next;
-            } while (prev != start);
+            // O(1) removal using prev pointer
+            entries[e.prev].next = e.next;
+            entries[e.next].prev = e.prev;
             
-            // If we didn't find the entry, something is wrong with the list structure
-            if (entries[prev].next != e.index) {
-                // List corruption detected - try to recover by resetting
-                m.hand = -1;
-                e.next = -1;
-                return;
-            }
-            
-            entries[prev].next = e.next;
+            // Update hand and tail pointers
             if (m.hand == (int)e.index) m.hand = e.next;
+            if (m.tail == (int)e.index) m.tail = e.prev;
         }
-        e.next = -1;
+        e.next = e.prev = -1;
     }
     
     static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        // SIEVE: walk the sieve - up to two full passes
         if (m.hand == -1) return nullptr;
         int start = m.hand;
+        int pass = 0;
         
         do {
             Entry& entry = entries[m.hand];
@@ -528,7 +489,11 @@ public:
                 }
             }
             m.hand = entry.next;
-        } while (m.hand != start);
+            if (m.hand == start) {
+                pass++;
+                if (pass == 2) break;
+            }
+        } while (true);
         
         return nullptr;
     }
@@ -565,11 +530,11 @@ template<typename Key, typename Value>
 class ARC {
 public:
     struct Entry : public CacheEntry<Key, Value> {
-        int next, prev;
-        bool in_t1;  // true if in T1, false if in T2
-        Entry() : CacheEntry<Key, Value>(), next(-1), prev(-1), in_t1(true) {}
+        int prev, next;
+        bool in_t1;
+        Entry() : CacheEntry<Key, Value>(), prev(-1), next(-1), in_t1(true) {}
         Entry(const Key& k, const Value& v, uint32_t idx) 
-            : CacheEntry<Key, Value>(k, v, idx), next(-1), prev(-1), in_t1(true) {}
+            : CacheEntry<Key, Value>(k, v, idx), prev(-1), next(-1), in_t1(true) {}
     };
     
     struct ManagerData {
@@ -669,7 +634,7 @@ public:
     static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
         int t1_size = count_list(m.t1_head, entries);
         int t2_size = count_list(m.t2_head, entries);
-        std::cout << "  ARC stats: T1=" << t1_size << ", T2=" << t2_size 
+        std::cout << "  ARC T1 size: " << t1_size << ", T2 size: " << t2_size 
                   << ", B1=" << m.b1_ghost.size() << ", B2=" << m.b2_ghost.size() 
                   << ", p=" << m.p << "/" << m.capacity << "\n";
     }

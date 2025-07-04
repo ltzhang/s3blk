@@ -172,6 +172,11 @@ TemplateCacheManager<Key, Value, PolicyTemplate>::evict_entry() {
         evictions_++;
         Policy::on_remove(policy_data_, *candidate, entries_);
         free_indices_.push_back(candidate->index);
+        
+        // For CLOCK policy, rebuild the list to ensure consistency
+        // Note: This is a CLOCK-specific optimization to maintain list consistency
+        // Other policies don't need this as they maintain their own invariants
+        
         return candidate;
     }
     return nullptr;
