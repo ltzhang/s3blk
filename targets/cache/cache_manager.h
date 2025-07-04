@@ -469,4 +469,7 @@ using CLOCKCacheManager = TemplateCacheManager<Key, Value, CLOCK>;
 template<typename Key, typename Value>
 using SIEVECacheManager = TemplateCacheManager<Key, Value, SIEVE>;
 
+template<typename Key, typename Value>
+using ARCCacheManager = TemplateCacheManager<Key, Value, ARC>;
+
 #endif // TEMPLATE_CACHE_MANAGER_HPP 

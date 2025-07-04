@@ -379,6 +379,143 @@ public:
 };
 
 // ============================================================================
+// ARC Golden Data Structure
+// ============================================================================
+
+class ARCGoldenValidator {
+private:
+    std::vector<int> t1_;  // Recent entries (LRU)
+    std::vector<int> t2_;  // Frequent entries (LRU)
+    std::vector<int> b1_;  // Ghost list for T1
+    std::vector<int> b2_;  // Ghost list for T2
+    int p_;  // Adaptive parameter
+    size_t capacity_;
+    
+public:
+    ARCGoldenValidator(size_t capacity) : p_(0), capacity_(capacity) {}
+    
+    void access(int key) {
+        // Check if key is in T1
+        auto t1_it = std::find(t1_.begin(), t1_.end(), key);
+        if (t1_it != t1_.end()) {
+            // Move from T1 to T2 (promotion)
+            t1_.erase(t1_it);
+            t2_.push_back(key);
+            return;
+        }
+        
+        // Check if key is in T2
+        auto t2_it = std::find(t2_.begin(), t2_.end(), key);
+        if (t2_it != t2_.end()) {
+            // Move to end of T2 (LRU update)
+            t2_.erase(t2_it);
+            t2_.push_back(key);
+            return;
+        }
+    }
+    
+    int get_eviction_candidate() {
+        size_t t1_size = t1_.size();
+        size_t t2_size = t2_.size();
+        
+        if (t1_size + t2_size < capacity_) {
+            return -1;  // No eviction needed
+        }
+        
+        // Case A: T1 has more than p elements
+        if (t1_size > p_) {
+            return t1_.front();  // Evict from T1 head (oldest)
+        }
+        // Case B: T1 has exactly p elements and T2 is not empty
+        else if (t1_size == p_ && t2_size > 0) {
+            return t2_.front();  // Evict from T2 head (oldest)
+        }
+        // Case C: T1 has less than p elements
+        else {
+            return t1_.front();  // Evict from T1 head (oldest)
+        }
+    }
+    
+    void insert(int key) {
+        // Check if key exists in ghost lists
+        bool in_b1 = std::find(b1_.begin(), b1_.end(), key) != b1_.end();
+        bool in_b2 = std::find(b2_.begin(), b2_.end(), key) != b2_.end();
+        
+        if (in_b1) {
+            // Case I: key in B1 (recently evicted from T1)
+            // Increase p to favor T1
+            p_ = std::min(p_ + std::max(1, (int)(b2_.size() / std::max(1, (int)b1_.size()))), (int)capacity_);
+            b1_.erase(std::remove(b1_.begin(), b1_.end(), key), b1_.end());
+            // Insert into T2
+            t2_.push_back(key);
+        } else if (in_b2) {
+            // Case II: key in B2 (recently evicted from T2)
+            // Decrease p to favor T2
+            p_ = std::max(p_ - std::max(1, (int)(b1_.size() / std::max(1, (int)b2_.size()))), 0);
+            b2_.erase(std::remove(b2_.begin(), b2_.end(), key), b2_.end());
+            // Insert into T2
+            t2_.push_back(key);
+        } else {
+            // Case III: key not in ghost lists
+            // Insert into T1
+            t1_.push_back(key);
+        }
+        
+        // Handle eviction if needed
+        while (t1_.size() + t2_.size() > capacity_) {
+            int evict_key = get_eviction_candidate();
+            if (evict_key == -1) break;
+            
+            // Remove from appropriate list and add to ghost list
+            auto t1_it = std::find(t1_.begin(), t1_.end(), evict_key);
+            if (t1_it != t1_.end()) {
+                t1_.erase(t1_it);
+                b1_.push_back(evict_key);
+            } else {
+                auto t2_it = std::find(t2_.begin(), t2_.end(), evict_key);
+                if (t2_it != t2_.end()) {
+                    t2_.erase(t2_it);
+                    b2_.push_back(evict_key);
+                }
+            }
+        }
+    }
+    
+    void remove(int key) {
+        auto t1_it = std::find(t1_.begin(), t1_.end(), key);
+        if (t1_it != t1_.end()) {
+            t1_.erase(t1_it);
+            b1_.push_back(key);
+            return;
+        }
+        
+        auto t2_it = std::find(t2_.begin(), t2_.end(), key);
+        if (t2_it != t2_.end()) {
+            t2_.erase(t2_it);
+            b2_.push_back(key);
+            return;
+        }
+    }
+    
+    bool contains(int key) const {
+        return std::find(t1_.begin(), t1_.end(), key) != t1_.end() ||
+               std::find(t2_.begin(), t2_.end(), key) != t2_.end();
+    }
+    
+    size_t size() const {
+        return t1_.size() + t2_.size();
+    }
+    
+    void clear() {
+        t1_.clear();
+        t2_.clear();
+        b1_.clear();
+        b2_.clear();
+        p_ = 0;
+    }
+};
+
+// ============================================================================
 // Test Functions
 // ============================================================================
 
@@ -651,6 +788,14 @@ void run_all_tests() {
     test_edge_cases<SIEVECacheManager<int, int>, SIEVEGoldenValidator>();
     test_stress_test<SIEVECacheManager<int, int>, SIEVEGoldenValidator>();
     test_concurrent_access<SIEVECacheManager<int, int>, SIEVEGoldenValidator>();
+    
+    // Test ARC Cache
+    TestLogger::log("=== Testing ARC Cache ===");
+    test_basic_operations<ARCCacheManager<int, int>, ARCGoldenValidator>();
+    test_policy_specific_behavior<ARCCacheManager<int, int>, ARCGoldenValidator>();
+    test_edge_cases<ARCCacheManager<int, int>, ARCGoldenValidator>();
+    test_stress_test<ARCCacheManager<int, int>, ARCGoldenValidator>();
+    test_concurrent_access<ARCCacheManager<int, int>, ARCGoldenValidator>();
     
     TestLogger::success("All tests passed successfully!");
 }

@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <functional>
 #include <iostream>
+#include <cassert>
 
 // Base entry for all policies - templated on Key and Value types
 template<typename Key, typename Value>
@@ -305,6 +306,7 @@ public:
     
     struct ManagerData {
         int hand = -1;
+        int tail = -1;  // Add tail pointer for O(1) inserts
     };
     
     using EntryType = Entry;
@@ -317,40 +319,92 @@ public:
     static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
         if (m.hand == -1) {
             m.hand = e.index;
+            m.tail = e.index;
             e.next = e.index;
         } else {
-            int tail = m.hand;
-            while (entries[tail].next != m.hand) tail = entries[tail].next;
-            entries[tail].next = e.index;
+            // Insert after tail for O(1) operation
+            entries[m.tail].next = e.index;
             e.next = m.hand;
+            m.tail = e.index;
         }
     }
     
     static void on_remove(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        // Sanity check: traverse the circular list from m.hand and validate structure
+        if (m.hand != -1) {
+            int count = 0;
+            int idx = m.hand;
+            bool found = false;
+            int max_iters = entries.size() + 1; // +1 for circular
+            std::vector<bool> visited(entries.size(), false);
+            do {
+                if (idx < 0 || idx >= (int)entries.size()) {
+                    std::cerr << "[CLOCK::on_remove] Invalid next pointer: " << idx << "\n";
+                    return;
+                }
+                if (visited[idx]) {
+                    std::cerr << "[CLOCK::on_remove] Cycle detected at " << idx << "\n";
+                    return;
+                }
+                visited[idx] = true;
+                if ((int)e.index == idx) found = true;
+                idx = entries[idx].next;
+                count++;
+                if (count > max_iters) {
+                    std::cerr << "[CLOCK::on_remove] Exceeded max iterations, possible infinite loop\n";
+                    return;
+                }
+            } while (idx != m.hand);
+            if (!found) {
+                std::cerr << "[CLOCK::on_remove] Entry to remove (index " << e.index << ") not found in CLOCK list\n";
+                return;
+            }
+        }
         if (e.next == e.index) {
+            // Only one entry, remove it
             m.hand = -1;
+            m.tail = -1;
         } else {
+            // Find previous entry with safety check to prevent infinite loop
             int prev = m.hand;
-            while (entries[prev].next != e.index) prev = entries[prev].next;
+            int start = prev;
+            do {
+                if (entries[prev].next == e.index) break;
+                prev = entries[prev].next;
+            } while (prev != start);
+            
+            // If we didn't find the entry, something is wrong with the list structure
+            assert (entries[prev].next == e.index); 
             entries[prev].next = e.next;
+            
+            // Update hand and tail pointers
             if (m.hand == (int)e.index) m.hand = e.next;
+            if (m.tail == (int)e.index) m.tail = prev;
         }
         e.next = -1;
     }
     
     static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
-        // CLOCK: walk the clock
+        // CLOCK: walk the clock - optimized single pass
         if (m.hand == -1) return nullptr;
         int start = m.hand;
+        
         do {
             Entry& entry = entries[m.hand];
             if (can_evict(entry)) {
-                Entry* victim = &entry;
-                m.hand = entry.next;
-                return victim;
+                if (!entry.reference_bit) {
+                    // Found a victim with reference bit = false
+                    Entry* victim = &entry;
+                    m.hand = entry.next;
+                    return victim;
+                } else {
+                    // Clear reference bit and give second chance
+                    entry.reference_bit = false;
+                }
             }
             m.hand = entry.next;
         } while (m.hand != start);
+        
         return nullptr;
     }
     
@@ -409,8 +463,22 @@ public:
             m.hand = e.index;
             e.next = e.index;
         } else {
+            // Find tail with safety check to prevent infinite loop
             int tail = m.hand;
-            while (entries[tail].next != m.hand) tail = entries[tail].next;
+            int start = tail;
+            do {
+                if (entries[tail].next == m.hand) break;
+                tail = entries[tail].next;
+            } while (tail != start);
+            
+            // If we didn't find the tail, something is wrong with the list structure
+            if (entries[tail].next != m.hand) {
+                // List corruption detected - try to recover by resetting
+                m.hand = e.index;
+                e.next = e.index;
+                return;
+            }
+            
             entries[tail].next = e.index;
             e.next = m.hand;
         }
@@ -420,8 +488,22 @@ public:
         if (e.next == e.index) {
             m.hand = -1;
         } else {
+            // Find previous entry with safety check to prevent infinite loop
             int prev = m.hand;
-            while (entries[prev].next != e.index) prev = entries[prev].next;
+            int start = prev;
+            do {
+                if (entries[prev].next == e.index) break;
+                prev = entries[prev].next;
+            } while (prev != start);
+            
+            // If we didn't find the entry, something is wrong with the list structure
+            if (entries[prev].next != e.index) {
+                // List corruption detected - try to recover by resetting
+                m.hand = -1;
+                e.next = -1;
+                return;
+            }
+            
             entries[prev].next = e.next;
             if (m.hand == (int)e.index) m.hand = e.next;
         }
@@ -431,30 +513,23 @@ public:
     static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
         if (m.hand == -1) return nullptr;
         int start = m.hand;
-        // First pass: clear visited bits
+        
         do {
             Entry& entry = entries[m.hand];
             if (can_evict(entry)) {
                 if (!entry.visited) {
+                    // Found a victim that hasn't been visited
                     Entry* victim = &entry;
                     m.hand = entry.next;
                     return victim;
                 } else {
+                    // Clear visited bit and give second chance
                     entry.visited = false;
                 }
             }
             m.hand = entry.next;
         } while (m.hand != start);
-        // Second pass: now all evictable entries are unvisited
-        do {
-            Entry& entry = entries[m.hand];
-            if (can_evict(entry) && !entry.visited) {
-                Entry* victim = &entry;
-                m.hand = entry.next;
-                return victim;
-            }
-            m.hand = entry.next;
-        } while (m.hand != start);
+        
         return nullptr;
     }
     
@@ -485,11 +560,189 @@ public:
     }
 };
 
+// ===================== ARC Policy =====================
+template<typename Key, typename Value>
+class ARC {
+public:
+    struct Entry : public CacheEntry<Key, Value> {
+        int next, prev;
+        bool in_t1;  // true if in T1, false if in T2
+        Entry() : CacheEntry<Key, Value>(), next(-1), prev(-1), in_t1(true) {}
+        Entry(const Key& k, const Value& v, uint32_t idx) 
+            : CacheEntry<Key, Value>(k, v, idx), next(-1), prev(-1), in_t1(true) {}
+    };
+    
+    struct ManagerData {
+        // T1: recent entries (LRU), T2: frequent entries (LRU)
+        int t1_head = -1, t1_tail = -1;
+        int t2_head = -1, t2_tail = -1;
+        
+        // Ghost lists: B1 (recently evicted from T1), B2 (recently evicted from T2)
+        std::unordered_map<Key, bool> b1_ghost;  // key -> true (ghost entry)
+        std::unordered_map<Key, bool> b2_ghost;  // key -> true (ghost entry)
+        
+        // Adaptive parameter p (0 <= p <= c, where c is cache capacity)
+        int p = 0;
+        int capacity = 0;
+    };
+    
+    using EntryType = Entry;
+    using ManagerDataType = ManagerData;
+    
+    static void on_access(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        if (e.in_t1) {
+            // Move from T1 to T2 (promotion)
+            remove_from_list(m.t1_head, m.t1_tail, e, entries);
+            add_to_list_head(m.t2_head, m.t2_tail, e, entries);
+            e.in_t1 = false;
+        } else {
+            // Already in T2, move to head (LRU update)
+            remove_from_list(m.t2_head, m.t2_tail, e, entries);
+            add_to_list_head(m.t2_head, m.t2_tail, e, entries);
+        }
+    }
+    
+    static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        // Check if key exists in ghost lists
+        bool in_b1 = m.b1_ghost.count(e.key) > 0;
+        bool in_b2 = m.b2_ghost.count(e.key) > 0;
+        
+        if (in_b1) {
+            // Case I: key in B1 (recently evicted from T1)
+            // Increase p to favor T1
+            m.p = std::min(m.p + std::max(1, (int)(m.b2_ghost.size() / m.b1_ghost.size())), m.capacity);
+            m.b1_ghost.erase(e.key);
+            // Insert into T2
+            add_to_list_head(m.t2_head, m.t2_tail, e, entries);
+            e.in_t1 = false;
+        } else if (in_b2) {
+            // Case II: key in B2 (recently evicted from T2)
+            // Decrease p to favor T2
+            m.p = std::max(m.p - std::max(1, (int)(m.b1_ghost.size() / m.b2_ghost.size())), 0);
+            m.b2_ghost.erase(e.key);
+            // Insert into T2
+            add_to_list_head(m.t2_head, m.t2_tail, e, entries);
+            e.in_t1 = false;
+        } else {
+            // Case III: key not in ghost lists
+            // Insert into T1
+            add_to_list_head(m.t1_head, m.t1_tail, e, entries);
+            e.in_t1 = true;
+        }
+    }
+    
+    static void on_remove(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        if (e.in_t1) {
+            remove_from_list(m.t1_head, m.t1_tail, e, entries);
+            // Add to B1 ghost list
+            m.b1_ghost[e.key] = true;
+        } else {
+            remove_from_list(m.t2_head, m.t2_tail, e, entries);
+            // Add to B2 ghost list
+            m.b2_ghost[e.key] = true;
+        }
+    }
+    
+    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        int t1_size = count_list(m.t1_head, entries);
+        int t2_size = count_list(m.t2_head, entries);
+        
+        // Case A: T1 has more than p elements
+        if (t1_size > m.p) {
+            // Evict from T1 tail
+            return find_evictable_from_tail(m.t1_tail, entries, can_evict);
+        }
+        // Case B: T1 has exactly p elements and T2 is not empty
+        else if (t1_size == m.p && t2_size > 0) {
+            // Evict from T2 tail
+            return find_evictable_from_tail(m.t2_tail, entries, can_evict);
+        }
+        // Case C: T1 has less than p elements
+        else {
+            // Evict from T1 tail
+            return find_evictable_from_tail(m.t1_tail, entries, can_evict);
+        }
+    }
+    
+    static const char* name() { return "ARC"; }
+    
+    static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
+        int t1_size = count_list(m.t1_head, entries);
+        int t2_size = count_list(m.t2_head, entries);
+        std::cout << "  ARC stats: T1=" << t1_size << ", T2=" << t2_size 
+                  << ", B1=" << m.b1_ghost.size() << ", B2=" << m.b2_ghost.size() 
+                  << ", p=" << m.p << "/" << m.capacity << "\n";
+    }
+    
+    static void print_state(const ManagerData& m, const std::vector<Entry>& entries) {
+        std::cout << "  ARC T1 (recent): ";
+        print_list(m.t1_head, entries);
+        std::cout << "  ARC T2 (frequent): ";
+        print_list(m.t2_head, entries);
+        std::cout << "  ARC B1 ghost: " << m.b1_ghost.size() << " entries\n";
+        std::cout << "  ARC B2 ghost: " << m.b2_ghost.size() << " entries\n";
+        std::cout << "  ARC p: " << m.p << "/" << m.capacity << "\n";
+    }
+    
+    static std::string get_entry_info(const Entry& entry) {
+        return ", in_t1: " + std::string(entry.in_t1 ? "true" : "false");
+    }
+    
+private:
+    static void add_to_list_head(int& head, int& tail, Entry& e, std::vector<Entry>& entries) {
+        e.next = head;
+        e.prev = -1;
+        if (head != -1) entries[head].prev = e.index;
+        head = e.index;
+        if (tail == -1) tail = e.index;
+    }
+    
+    static void remove_from_list(int& head, int& tail, Entry& e, std::vector<Entry>& entries) {
+        if (e.prev != -1) entries[e.prev].next = e.next;
+        if (e.next != -1) entries[e.next].prev = e.prev;
+        if (head == (int)e.index) head = e.next;
+        if (tail == (int)e.index) tail = e.prev;
+        e.prev = e.next = -1;
+    }
+    
+    static int count_list(int head, const std::vector<Entry>& entries) {
+        int count = 0;
+        int idx = head;
+        while (idx != -1) {
+            count++;
+            idx = entries[idx].next;
+        }
+        return count;
+    }
+    
+    static Entry* find_evictable_from_tail(int tail, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        int idx = tail;
+        while (idx != -1) {
+            Entry& entry = entries[idx];
+            if (can_evict(entry)) return &entry;
+            idx = entry.prev;
+        }
+        return nullptr;
+    }
+    
+    static void print_list(int head, const std::vector<Entry>& entries) {
+        int idx = head;
+        while (idx != -1) {
+            const Entry& entry = entries[idx];
+            std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << ")";
+            if (entry.next != -1) std::cout << " -> ";
+            idx = entry.next;
+        }
+        std::cout << "\n";
+    }
+};
+
 // Type aliases for common use cases
 using LRUPolicy = LRU<uint64_t, uint64_t>;  // For sector-based caching
 using LFUPolicy = LFU<uint64_t, uint64_t>;
 using FIFOPolicy = FIFO<uint64_t, uint64_t>;
 using CLOCKPolicy = CLOCK<uint64_t, uint64_t>;
 using SIEVEPolicy = SIEVE<uint64_t, uint64_t>;
+using ARCPolicy = ARC<uint64_t, uint64_t>;
 
 #endif // POLICY_TRAITS_HPP 

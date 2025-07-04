@@ -359,6 +359,14 @@ void test_basic_dirty_operations() {
         // For this test, assume item 1 is evicted (simplified)
         assert(found5);  // Item 5 should still be in cache
         assert(!found1); // Item 1 should have been evicted
+    } else if (strcmp(policy_name, "SIEVE") == 0) {
+        // SIEVE: uses visited bits, behavior depends on sieve hand position
+        // This is more complex to predict without knowing the exact state
+        std::cout << "  SIEVE policy: behavior depends on sieve hand position and visited bits\n";
+    } else if (strcmp(policy_name, "ARC") == 0) {
+        // ARC: adaptive replacement cache, behavior depends on T1/T2 balance and ghost lists
+        // This is complex to predict without knowing the exact state
+        std::cout << "  ARC policy: adaptive behavior depends on T1/T2 balance and ghost lists\n";
     }
     
     TestLogger::success("Basic dirty operations test passed");
@@ -908,12 +916,13 @@ void run_tests(int index = 0) {
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [cache_type] [test_number]\n";
     std::cout << "Cache types:\n";
-    std::cout << "  all   - All cache types (LRU, LFU, FIFO, CLOCK, SIEVE)\n";
+    std::cout << "  all   - All cache types (LRU, LFU, FIFO, CLOCK, SIEVE, ARC)\n";
     std::cout << "  lru   - LRU Cache\n";
     std::cout << "  lfu   - LFU Cache\n";
     std::cout << "  fifo  - FIFO Cache\n";
     std::cout << "  clock - CLOCK Cache\n";
     std::cout << "  sieve - SIEVE Cache\n";
+    std::cout << "  arc   - ARC Cache\n";
     std::cout << "\nTest numbers:\n";
     std::cout << "  0  - Run all tests for the specified cache type(s)\n";
     std::cout << "  1  - Basic pin/unpin test\n";
@@ -933,6 +942,7 @@ void print_usage(const char* program_name) {
     std::cout << "  " << program_name << " lfu 1    # Run basic pin/unpin test with LFU\n";
     std::cout << "  " << program_name << " fifo 5   # Run dirty operations test with FIFO\n";
     std::cout << "  " << program_name << " sieve 0  # Run all SIEVE tests\n";
+    std::cout << "  " << program_name << " arc 0    # Run all ARC tests\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -968,6 +978,8 @@ int main(int argc, char* argv[]) {
             run_tests<CLOCKCacheManager<int, int>>(test_number);
             TestLogger::log("Testing SIEVE Cache...");
             run_tests<SIEVECacheManager<int, int>>(test_number);
+            TestLogger::log("Testing ARC Cache...");
+            run_tests<ARCCacheManager<int, int>>(test_number);
         } else if (cache_type == "lru") {
             run_tests<LRUCacheManager<int, int>>(test_number);
         } else if (cache_type == "lfu") {
@@ -978,6 +990,8 @@ int main(int argc, char* argv[]) {
             run_tests<CLOCKCacheManager<int, int>>(test_number);
         } else if (cache_type == "sieve") {
             run_tests<SIEVECacheManager<int, int>>(test_number);
+        } else if (cache_type == "arc") {
+            run_tests<ARCCacheManager<int, int>>(test_number);
         } else {
             std::cout << "Invalid cache type: " << cache_type << "\n";
             print_usage(argv[0]);
