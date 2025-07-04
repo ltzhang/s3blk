@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT or GPL-2.0-only
 
+// NOTE: All EntryType definitions in policy_traits.h must include: int pin_count = 0;
+
 #ifndef TEMPLATE_CACHE_MANAGER_HPP
 #define TEMPLATE_CACHE_MANAGER_HPP
 
@@ -22,7 +24,7 @@ public:
     using ValueType = typename EntryType::value_type;
     
     // Constructor and destructor
-    explicit TemplateCacheManager(uint64_t cache_size);
+    explicit TemplateCacheManager(uint64_t cache_size, bool debug = false);
     ~TemplateCacheManager();
     
     // Disable copy constructor and assignment operator
@@ -31,7 +33,7 @@ public:
     
     // Core cache operations
     bool lookup(const KeyType& key, ValueType& value);
-    ValueType insert(const KeyType& key, const ValueType& value);
+    bool insert(const KeyType& key, const ValueType& value);
     void mark_dirty(const KeyType& key);
     void mark_clean(const KeyType& key);
     void invalidate(const KeyType& key);
@@ -51,11 +53,21 @@ public:
     // Debug and monitoring
     void print_stats() const;
     void print_state() const;
+    void set_debug(bool debug) { debug_ = debug; }
+
+    void pin(const KeyType& key);
+    void unpin(const KeyType& key);
+    std::vector<KeyType> get_dirty(size_t n) const;
+
+    // Get policy name for testing
+    const char* get_policy_name() const { return Policy::name(); }
 
 private:
     // Helper methods
     EntryType* evict_entry();
     EntryType* create_entry(const KeyType& key, const ValueType& value, uint32_t index);
+    bool can_evict(const EntryType& entry) const;
+    void debug_print(const std::string& operation, const KeyType& key = KeyType{}) const;
     
     // Member variables
     std::unordered_map<KeyType, uint32_t> cache_map_;  // key -> index in entries vector
@@ -66,6 +78,7 @@ private:
     
     uint64_t cache_size_;
     uint64_t used_entries_;
+    bool debug_;
     
     // Cache statistics
     uint64_t hits_;
@@ -78,9 +91,9 @@ private:
 // ============================================================================
 
 template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
-TemplateCacheManager<Key, Value, PolicyTemplate>::TemplateCacheManager(uint64_t cache_size)
+TemplateCacheManager<Key, Value, PolicyTemplate>::TemplateCacheManager(uint64_t cache_size, bool debug)
     : cache_size_(cache_size), used_entries_(0),
-      hits_(0), misses_(0), evictions_(0) {
+      hits_(0), misses_(0), evictions_(0), debug_(debug) {
     
     // Pre-allocate entries vector
     entries_.resize(cache_size);
@@ -105,21 +118,63 @@ TemplateCacheManager<Key, Value, PolicyTemplate>::create_entry(const KeyType& ke
 }
 
 template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
-typename TemplateCacheManager<Key, Value, PolicyTemplate>::EntryType* 
-TemplateCacheManager<Key, Value, PolicyTemplate>::evict_entry() {
-    EntryType* entry_to_evict = Policy::get_eviction_candidate(policy_data_, entries_);
+bool TemplateCacheManager<Key, Value, PolicyTemplate>::can_evict(const EntryType& entry) const {
+    return entry.valid && entry.pin_count == 0 && !entry.dirty;
+}
+
+template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
+void TemplateCacheManager<Key, Value, PolicyTemplate>::debug_print(const std::string& operation, const KeyType& key) const {
+    if (!debug_) return;
     
-    if (entry_to_evict) {
-        entry_to_evict->valid = false;
-        used_entries_--;
-        evictions_++;
-        Policy::on_remove(policy_data_, *entry_to_evict, entries_);
-        
-        // Return index to free pool
-        free_indices_.push_back(entry_to_evict->index);
+    std::cout << "\n=== DEBUG: " << operation;
+    if (key != KeyType{}) {
+        std::cout << " (key=" << key << ")";
+    }
+    std::cout << " ===\n";
+    std::cout << "Used entries: " << used_entries_ << "/" << cache_size_ << "\n";
+    std::cout << "Cache contents:\n";
+    
+    for (const auto& pair : cache_map_) {
+        const EntryType& entry = entries_[pair.second];
+        if (entry.valid) {
+            std::cout << "  " << pair.first << " -> " << entry.value 
+                      << " (index: " << entry.index
+                      << ", pin_count: " << entry.pin_count
+                      << ", dirty: " << (entry.dirty ? "yes" : "no") << ")\n";
+        }
     }
     
-    return entry_to_evict;
+    if constexpr (std::is_same_v<PolicyTemplate<Key, Value>, LRU<Key, Value>>) {
+        std::cout << "LRU list: ";
+        int idx = policy_data_.head;
+        while (idx != -1) {
+            const EntryType& entry = entries_[idx];
+            std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << ")";
+            if (entry.next != -1) std::cout << " -> ";
+            idx = entry.next;
+        }
+        std::cout << "\n";
+    }
+    std::cout << "========================\n" << std::flush;
+}
+
+template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
+typename TemplateCacheManager<Key, Value, PolicyTemplate>::EntryType* 
+TemplateCacheManager<Key, Value, PolicyTemplate>::evict_entry() {
+    // Policy-agnostic: ask the policy for an evictable candidate
+    auto can_evict_pred = [this](const EntryType& entry) { return can_evict(entry); };
+    for (size_t attempts = 0; attempts < entries_.size(); ++attempts) {
+        EntryType* candidate = Policy::get_eviction_candidate(policy_data_, entries_, can_evict_pred);
+        if (!candidate) return nullptr;
+        // Evict the candidate
+        candidate->valid = false;
+        used_entries_--;
+        evictions_++;
+        Policy::on_remove(policy_data_, *candidate, entries_);
+        free_indices_.push_back(candidate->index);
+        return candidate;
+    }
+    return nullptr;
 }
 
 template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
@@ -132,15 +187,17 @@ bool TemplateCacheManager<Key, Value, PolicyTemplate>::lookup(const KeyType& key
         value = entry.value;
         Policy::on_access(policy_data_, entry, entries_);
         hits_++;
+        debug_print("LOOKUP", key);
         return true;
     }
     
     misses_++;
+    debug_print("LOOKUP_MISS", key);
     return false;
 }
 
 template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
-typename TemplateCacheManager<Key, Value, PolicyTemplate>::ValueType 
+bool
 TemplateCacheManager<Key, Value, PolicyTemplate>::insert(const KeyType& key, const ValueType& value) {
     std::lock_guard<std::mutex> lock(mutex_);
     
@@ -148,14 +205,22 @@ TemplateCacheManager<Key, Value, PolicyTemplate>::insert(const KeyType& key, con
     auto it = cache_map_.find(key);
     if (it != cache_map_.end() && entries_[it->second].valid) {
         Policy::on_access(policy_data_, entries_[it->second], entries_);
-        return entries_[it->second].value;
+        debug_print("INSERT_EXISTS", key);
+        return false;
     }
     
+    if (debug_) {
+        std::cout << "[INSERT] used_entries_=" << used_entries_ << ", cache_size_=" << cache_size_ << std::endl;
+    }
     // Need to evict if cache is full
     if (used_entries_ >= cache_size_) {
+        if (debug_) {
+            std::cout << "[INSERT] Cache full, attempting eviction for key=" << key << std::endl;
+        }
         EntryType* evicted = evict_entry();
         if (!evicted) {
-            return ValueType{}; // Cache full and no entry to evict
+            debug_print("INSERT_FAIL_NO_EVICT", key);
+            return false; // Cache full and no entry to evict
         }
         
         // Remove from map
@@ -164,7 +229,8 @@ TemplateCacheManager<Key, Value, PolicyTemplate>::insert(const KeyType& key, con
     
     // Get free index
     if (free_indices_.empty()) {
-        return ValueType{}; // No free indices
+        debug_print("INSERT_FAIL_NO_FREE", key);
+        return false; // No free indices
     }
     
     uint32_t index = free_indices_.back();
@@ -179,7 +245,8 @@ TemplateCacheManager<Key, Value, PolicyTemplate>::insert(const KeyType& key, con
     
     used_entries_++;
     
-    return value;
+    debug_print("INSERT", key);
+    return true;
 }
 
 template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
@@ -189,6 +256,9 @@ void TemplateCacheManager<Key, Value, PolicyTemplate>::mark_dirty(const KeyType&
     auto it = cache_map_.find(key);
     if (it != cache_map_.end() && entries_[it->second].valid) {
         entries_[it->second].dirty = true;
+        debug_print("MARK_DIRTY", key);
+    } else {
+        debug_print("MARK_DIRTY_FAIL", key);
     }
 }
 
@@ -199,6 +269,9 @@ void TemplateCacheManager<Key, Value, PolicyTemplate>::mark_clean(const KeyType&
     auto it = cache_map_.find(key);
     if (it != cache_map_.end() && entries_[it->second].valid) {
         entries_[it->second].dirty = false;
+        debug_print("MARK_CLEAN", key);
+    } else {
+        debug_print("MARK_CLEAN_FAIL", key);
     }
 }
 
@@ -308,6 +381,7 @@ void TemplateCacheManager<Key, Value, PolicyTemplate>::print_stats() const {
     std::cout << "  Misses: " << misses_ << "\n";
     std::cout << "  Evictions: " << evictions_ << "\n";
     std::cout << "  Hit ratio: " << (get_hit_ratio() * 100.0) << "%\n";
+    Policy::print_stats(policy_data_, entries_);
 }
 
 template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
@@ -315,6 +389,7 @@ void TemplateCacheManager<Key, Value, PolicyTemplate>::print_state() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::cout << "Cache State:\n";
     std::cout << "  Policy: " << Policy::name() << "\n";
+    std::cout << "  Used entries: " << used_entries_ << "/" << cache_size_ << "\n";
     std::cout << "  Cache entries:\n";
     
     for (const auto& pair : cache_map_) {
@@ -322,9 +397,56 @@ void TemplateCacheManager<Key, Value, PolicyTemplate>::print_state() const {
         if (entry.valid) {
             std::cout << "    " << pair.first << " -> " << entry.value 
                       << " (index: " << entry.index
-                      << ", dirty: " << (entry.dirty ? "yes" : "no") << ")\n";
+                      << ", pin_count: " << entry.pin_count
+                      << ", dirty: " << (entry.dirty ? "yes" : "no")
+                      << Policy::get_entry_info(entry) << ")\n";
         }
     }
+    
+    Policy::print_state(policy_data_, entries_);
+}
+
+template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
+void TemplateCacheManager<Key, Value, PolicyTemplate>::pin(const KeyType& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_map_.find(key);
+    if (it != cache_map_.end() && entries_[it->second].valid) {
+        entries_[it->second].pin_count++;
+        debug_print("PIN", key);
+    } else {
+        debug_print("PIN_FAIL", key);
+    }
+}
+
+template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
+void TemplateCacheManager<Key, Value, PolicyTemplate>::unpin(const KeyType& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_map_.find(key);
+    if (it != cache_map_.end() && entries_[it->second].valid) {
+        if (entries_[it->second].pin_count > 0) {
+            entries_[it->second].pin_count--;
+            debug_print("UNPIN", key);
+        } else {
+            debug_print("UNPIN_FAIL_ALREADY_UNPINNED", key);
+        }
+    } else {
+        debug_print("UNPIN_FAIL_NOT_FOUND", key);
+    }
+}
+
+template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
+std::vector<typename TemplateCacheManager<Key, Value, PolicyTemplate>::KeyType>
+TemplateCacheManager<Key, Value, PolicyTemplate>::get_dirty(size_t n) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<typename TemplateCacheManager<Key, Value, PolicyTemplate>::KeyType> dirty_keys;
+    for (const auto& pair : cache_map_) {
+        const EntryType& entry = entries_[pair.second];
+        if (entry.valid && entry.dirty) {
+            dirty_keys.push_back(pair.first);
+            if (dirty_keys.size() >= n) break;
+        }
+    }
+    return dirty_keys;
 }
 
 // ============================================================================
@@ -343,5 +465,8 @@ using FIFOCacheManager = TemplateCacheManager<Key, Value, FIFO>;
 
 template<typename Key, typename Value>
 using CLOCKCacheManager = TemplateCacheManager<Key, Value, CLOCK>;
+
+template<typename Key, typename Value>
+using SIEVECacheManager = TemplateCacheManager<Key, Value, SIEVE>;
 
 #endif // TEMPLATE_CACHE_MANAGER_HPP 

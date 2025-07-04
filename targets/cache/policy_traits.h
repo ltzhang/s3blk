@@ -9,6 +9,8 @@
 #include <limits>
 #include <algorithm>
 #include <type_traits>
+#include <functional>
+#include <iostream>
 
 // Base entry for all policies - templated on Key and Value types
 template<typename Key, typename Value>
@@ -21,10 +23,11 @@ struct CacheEntry {
     bool dirty;
     bool valid;
     uint32_t index;
+    int pin_count = 0;
     
-    CacheEntry() : key(), value(), dirty(false), valid(false), index(0) {}
+    CacheEntry() : key(), value(), dirty(false), valid(false), index(0), pin_count(0) {}
     CacheEntry(const Key& k, const Value& v, uint32_t idx)
-        : key(k), value(v), dirty(false), valid(true), index(idx) {}
+        : key(k), value(v), dirty(false), valid(true), index(idx), pin_count(0) {}
 };
 
 // ===================== LRU Policy =====================
@@ -75,12 +78,38 @@ public:
         e.prev = e.next = -1;
     }
     
-    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries) {
-        if (m.tail == -1) return nullptr;
-        return &entries[m.tail];
+    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        // LRU: walk from tail to head
+        int idx = m.tail;
+        while (idx != -1) {
+            Entry& entry = entries[idx];
+            if (can_evict(entry)) return &entry;
+            idx = entry.prev;
+        }
+        return nullptr;
     }
     
     static const char* name() { return "LRU"; }
+    
+    static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
+        // LRU doesn't have policy-specific stats beyond the basic ones
+    }
+    
+    static void print_state(const ManagerData& m, const std::vector<Entry>& entries) {
+        std::cout << "  LRU list: ";
+        int idx = m.head;
+        while (idx != -1) {
+            const Entry& entry = entries[idx];
+            std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << ")";
+            if (entry.next != -1) std::cout << " -> ";
+            idx = entry.next;
+        }
+        std::cout << "\n";
+    }
+    
+    static std::string get_entry_info(const Entry& entry) {
+        return ""; // LRU doesn't have additional entry info
+    }
 };
 
 // ===================== LFU Policy =====================
@@ -117,23 +146,23 @@ public:
             m.bucket_tails.erase(old_count);
             if (m.min_count == old_count) m.min_count++;
         }
-        // Add to new bucket
+        // Add to new bucket (at tail to preserve recently added entries)
         e.access_count++;
-        e.prev_in_bucket = -1;
-        e.next_in_bucket = m.bucket_heads.count(e.access_count) ? m.bucket_heads[e.access_count] : -1;
-        if (e.next_in_bucket != -1) entries[e.next_in_bucket].prev_in_bucket = e.index;
-        m.bucket_heads[e.access_count] = e.index;
-        if (!m.bucket_tails.count(e.access_count)) m.bucket_tails[e.access_count] = e.index;
+        e.prev_in_bucket = m.bucket_tails.count(e.access_count) ? m.bucket_tails[e.access_count] : -1;
+        e.next_in_bucket = -1;
+        if (e.prev_in_bucket != -1) entries[e.prev_in_bucket].next_in_bucket = e.index;
+        m.bucket_tails[e.access_count] = e.index;
+        if (!m.bucket_heads.count(e.access_count)) m.bucket_heads[e.access_count] = e.index;
         if (m.min_count > e.access_count || m.bucket_heads.empty()) m.min_count = e.access_count;
     }
     
     static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
         e.access_count = 1;
-        e.prev_in_bucket = -1;
-        e.next_in_bucket = m.bucket_heads.count(1) ? m.bucket_heads[1] : -1;
-        if (e.next_in_bucket != -1) entries[e.next_in_bucket].prev_in_bucket = e.index;
-        m.bucket_heads[1] = e.index;
-        if (!m.bucket_tails.count(1)) m.bucket_tails[1] = e.index;
+        e.prev_in_bucket = m.bucket_tails.count(1) ? m.bucket_tails[1] : -1;
+        e.next_in_bucket = -1;
+        if (e.prev_in_bucket != -1) entries[e.prev_in_bucket].next_in_bucket = e.index;
+        m.bucket_tails[1] = e.index;
+        if (!m.bucket_heads.count(1)) m.bucket_heads[1] = e.index;
         m.min_count = 1;
     }
     
@@ -151,13 +180,45 @@ public:
         e.prev_in_bucket = e.next_in_bucket = -1;
     }
     
-    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries) {
+    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        // LFU: walk through min frequency bucket
         if (m.bucket_heads.empty()) return nullptr;
         int idx = m.bucket_heads[m.min_count];
-        return idx == -1 ? nullptr : &entries[idx];
+        while (idx != -1) {
+            Entry& entry = entries[idx];
+            if (can_evict(entry)) return &entry;
+            idx = entry.next_in_bucket;
+        }
+        return nullptr;
     }
     
     static const char* name() { return "LFU"; }
+    
+    static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
+        // LFU doesn't have policy-specific stats beyond the basic ones
+    }
+    
+    static void print_state(const ManagerData& m, const std::vector<Entry>& entries) {
+        std::cout << "  LFU frequency buckets:\n";
+        for (const auto& bucket : m.bucket_heads) {
+            uint64_t count = bucket.first;
+            int head_idx = bucket.second;
+            std::cout << "    frequency " << count << ": ";
+            int idx = head_idx;
+            while (idx != -1) {
+                const Entry& entry = entries[idx];
+                std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << ")";
+                if (entry.next_in_bucket != -1) std::cout << " -> ";
+                idx = entry.next_in_bucket;
+            }
+            std::cout << "\n";
+        }
+        std::cout << "  min_count: " << m.min_count << "\n";
+    }
+    
+    static std::string get_entry_info(const Entry& entry) {
+        return ", frequency: " + std::to_string(entry.access_count);
+    }
 };
 
 // ===================== FIFO Policy =====================
@@ -196,12 +257,38 @@ public:
         e.prev = e.next = -1;
     }
     
-    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries) {
-        if (m.head == -1) return nullptr;
-        return &entries[m.head];
+    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        // FIFO: walk from head to tail
+        int idx = m.head;
+        while (idx != -1) {
+            Entry& entry = entries[idx];
+            if (can_evict(entry)) return &entry;
+            idx = entry.next;
+        }
+        return nullptr;
     }
     
     static const char* name() { return "FIFO"; }
+    
+    static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
+        // FIFO doesn't have policy-specific stats beyond the basic ones
+    }
+    
+    static void print_state(const ManagerData& m, const std::vector<Entry>& entries) {
+        std::cout << "  FIFO list: ";
+        int idx = m.head;
+        while (idx != -1) {
+            const Entry& entry = entries[idx];
+            std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << ")";
+            if (entry.next != -1) std::cout << " -> ";
+            idx = entry.next;
+        }
+        std::cout << "\n";
+    }
+    
+    static std::string get_entry_info(const Entry& entry) {
+        return ""; // FIFO doesn't have additional entry info
+    }
 };
 
 // ===================== CLOCK Policy =====================
@@ -251,23 +338,151 @@ public:
         e.next = -1;
     }
     
-    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries) {
+    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        // CLOCK: walk the clock
         if (m.hand == -1) return nullptr;
         int start = m.hand;
         do {
-            if (!entries[m.hand].reference_bit) {
-                Entry* victim = &entries[m.hand];
-                m.hand = entries[m.hand].next;
+            Entry& entry = entries[m.hand];
+            if (can_evict(entry)) {
+                Entry* victim = &entry;
+                m.hand = entry.next;
                 return victim;
-            } else {
-                entries[m.hand].reference_bit = false;
-                m.hand = entries[m.hand].next;
             }
+            m.hand = entry.next;
         } while (m.hand != start);
-        return &entries[m.hand];
+        return nullptr;
     }
     
     static const char* name() { return "CLOCK"; }
+    
+    static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
+        // CLOCK doesn't have policy-specific stats beyond the basic ones
+    }
+    
+    static void print_state(const ManagerData& m, const std::vector<Entry>& entries) {
+        std::cout << "  CLOCK hand: " << (m.hand == -1 ? "none" : std::to_string(m.hand)) << "\n";
+        if (m.hand != -1) {
+            std::cout << "  CLOCK list: ";
+            int start = m.hand;
+            int idx = start;
+            do {
+                const Entry& entry = entries[idx];
+                std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << "," << (entry.reference_bit ? "R" : "r") << ")";
+                if (entry.next != idx) std::cout << " -> ";
+                idx = entry.next;
+            } while (idx != start);
+            std::cout << "\n";
+        }
+    }
+    
+    static std::string get_entry_info(const Entry& entry) {
+        return ", reference_bit: " + std::string(entry.reference_bit ? "true" : "false");
+    }
+};
+
+// ===================== SIEVE Policy =====================
+template<typename Key, typename Value>
+class SIEVE {
+public:
+    struct Entry : public CacheEntry<Key, Value> {
+        int next;
+        bool visited;
+        Entry() : CacheEntry<Key, Value>(), next(-1), visited(false) {}
+        Entry(const Key& k, const Value& v, uint32_t idx) 
+            : CacheEntry<Key, Value>(k, v, idx), next(-1), visited(true) {}
+    };
+    
+    struct ManagerData {
+        int hand = -1;
+    };
+    
+    using EntryType = Entry;
+    using ManagerDataType = ManagerData;
+    
+    static void on_access(ManagerData&, Entry& e, std::vector<Entry>&) {
+        e.visited = true;
+    }
+    
+    static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        if (m.hand == -1) {
+            m.hand = e.index;
+            e.next = e.index;
+        } else {
+            int tail = m.hand;
+            while (entries[tail].next != m.hand) tail = entries[tail].next;
+            entries[tail].next = e.index;
+            e.next = m.hand;
+        }
+    }
+    
+    static void on_remove(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        if (e.next == e.index) {
+            m.hand = -1;
+        } else {
+            int prev = m.hand;
+            while (entries[prev].next != e.index) prev = entries[prev].next;
+            entries[prev].next = e.next;
+            if (m.hand == (int)e.index) m.hand = e.next;
+        }
+        e.next = -1;
+    }
+    
+    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        if (m.hand == -1) return nullptr;
+        int start = m.hand;
+        // First pass: clear visited bits
+        do {
+            Entry& entry = entries[m.hand];
+            if (can_evict(entry)) {
+                if (!entry.visited) {
+                    Entry* victim = &entry;
+                    m.hand = entry.next;
+                    return victim;
+                } else {
+                    entry.visited = false;
+                }
+            }
+            m.hand = entry.next;
+        } while (m.hand != start);
+        // Second pass: now all evictable entries are unvisited
+        do {
+            Entry& entry = entries[m.hand];
+            if (can_evict(entry) && !entry.visited) {
+                Entry* victim = &entry;
+                m.hand = entry.next;
+                return victim;
+            }
+            m.hand = entry.next;
+        } while (m.hand != start);
+        return nullptr;
+    }
+    
+    static const char* name() { return "SIEVE"; }
+    
+    static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
+        // SIEVE doesn't have policy-specific stats beyond the basic ones
+    }
+    
+    static void print_state(const ManagerData& m, const std::vector<Entry>& entries) {
+        std::cout << "  SIEVE hand: " << (m.hand == -1 ? "none" : std::to_string(m.hand)) << "\n";
+        if (m.hand != -1) {
+            std::cout << "  SIEVE list: ";
+            int start = m.hand;
+            int idx = start;
+            do {
+                const Entry& entry = entries[idx];
+                std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << "," << (entry.visited ? "V" : "v") << ")";
+                if (entry.next != idx) std::cout << " -> ";
+                idx = entry.next;
+            } while (idx != start);
+            std::cout << "\n";
+        }
+    }
+    
+    static std::string get_entry_info(const Entry& entry) {
+        return ", visited: " + std::string(entry.visited ? "true" : "false");
+    }
 };
 
 // Type aliases for common use cases
@@ -275,5 +490,6 @@ using LRUPolicy = LRU<uint64_t, uint64_t>;  // For sector-based caching
 using LFUPolicy = LFU<uint64_t, uint64_t>;
 using FIFOPolicy = FIFO<uint64_t, uint64_t>;
 using CLOCKPolicy = CLOCK<uint64_t, uint64_t>;
+using SIEVEPolicy = SIEVE<uint64_t, uint64_t>;
 
 #endif // POLICY_TRAITS_HPP 
