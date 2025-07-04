@@ -290,6 +290,92 @@ public:
 };
 
 // ============================================================================
+// CLOCK_FREQ Golden Data Structure
+// ============================================================================
+
+class CLOCK_FREQGoldenValidator {
+private:
+    std::vector<std::pair<int, int>> clock_;  // key -> frequency counter
+    size_t hand_;  // Clock hand position
+    size_t capacity_;
+
+public:
+    CLOCK_FREQGoldenValidator(size_t capacity) : hand_(0), capacity_(capacity) {}
+
+    void access(int key) {
+        // Find the key in the clock and increment frequency counter
+        for (auto& entry : clock_) {
+            if (entry.first == key) {
+                if (entry.second < 255) {  // Prevent overflow
+                    entry.second++;
+                }
+                return;
+            }
+        }
+    }
+
+    int get_eviction_candidate() {
+        if (clock_.size() < capacity_) {
+            return -1;  // No eviction needed
+        }
+        
+        // Find victim using clock algorithm with frequency counter
+        while (true) {
+            if (clock_[hand_].second > 1) {
+                // Decrement frequency and give another chance
+                clock_[hand_].second--;
+                hand_ = (hand_ + 1) % clock_.size();
+            } else {
+                // Found victim with frequency <= 1
+                return clock_[hand_].first;
+            }
+        }
+    }
+
+    void insert(int key) {
+        if (clock_.size() >= capacity_) {
+            int evict_key = get_eviction_candidate();
+            if (evict_key != -1) {
+                // Replace the evicted entry
+                for (auto& entry : clock_) {
+                    if (entry.first == evict_key) {
+                        entry.first = key;
+                        entry.second = 1;  // New entries get frequency = 1
+                        hand_ = (hand_ + 1) % clock_.size();
+                        return;
+                    }
+                }
+            }
+        } else {
+            // Add new entry
+            clock_.push_back({key, 1});  // New entries get frequency = 1
+        }
+    }
+
+    void remove(int key) {
+        auto it = std::find_if(clock_.begin(), clock_.end(),
+                              [key](const auto& entry) { return entry.first == key; });
+        if (it != clock_.end()) {
+            clock_.erase(it);
+        }
+    }
+
+    bool contains(int key) const {
+        return std::find_if(clock_.begin(), clock_.end(),
+                           [key](const auto& entry) { return entry.first == key; }) != clock_.end();
+    }
+
+    size_t size() const {
+        return clock_.size();
+    }
+
+    void clear() {
+        clock_.clear();
+        hand_ = 0;
+    }
+};
+
+// ============================================================================
 // SIEVE Golden Data Structure
 // ============================================================================
 
@@ -780,6 +866,14 @@ void run_all_tests() {
     test_edge_cases<CLOCKCacheManager<int, int>, CLOCKGoldenValidator>();
     test_stress_test<CLOCKCacheManager<int, int>, CLOCKGoldenValidator>();
     test_concurrent_access<CLOCKCacheManager<int, int>, CLOCKGoldenValidator>();
+    
+    // Test CLOCK_FREQ Cache
+    TestLogger::log("=== Testing CLOCK_FREQ Cache ===");
+    test_basic_operations<CLOCK_FREQCacheManager<int, int>, CLOCK_FREQGoldenValidator>();
+    test_policy_specific_behavior<CLOCK_FREQCacheManager<int, int>, CLOCK_FREQGoldenValidator>();
+    test_edge_cases<CLOCK_FREQCacheManager<int, int>, CLOCK_FREQGoldenValidator>();
+    test_stress_test<CLOCK_FREQCacheManager<int, int>, CLOCK_FREQGoldenValidator>();
+    test_concurrent_access<CLOCK_FREQCacheManager<int, int>, CLOCK_FREQGoldenValidator>();
     
     // Test SIEVE Cache
     TestLogger::log("=== Testing SIEVE Cache ===");

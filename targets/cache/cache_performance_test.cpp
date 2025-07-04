@@ -363,6 +363,10 @@ public:
                 results_.push_back(run_single_test<CLOCKCacheManager<uint64_t, uint64_t>>(
                     "CLOCK", pattern.first, cache_size, key_space_size, num_operations, pattern.second, report_interval));
                 
+                // CLOCK_FREQ
+                results_.push_back(run_single_test<CLOCK_FREQCacheManager<uint64_t, uint64_t>>(
+                    "CLOCK_FREQ", pattern.first, cache_size, key_space_size, num_operations, pattern.second, report_interval));
+                
                 // SIEVE
                 results_.push_back(run_single_test<SIEVECacheManager<uint64_t, uint64_t>>(
                     "SIEVE", pattern.first, cache_size, key_space_size, num_operations, pattern.second, report_interval));
@@ -388,6 +392,10 @@ public:
                 // CLOCK
                 results_.push_back(run_multi_threaded_test<CLOCKCacheManager<uint64_t, uint64_t>>(
                     "CLOCK", pattern.first, cache_size, key_space_size, num_operations, pattern.second, num_threads, report_interval));
+                
+                // CLOCK_FREQ
+                results_.push_back(run_multi_threaded_test<CLOCK_FREQCacheManager<uint64_t, uint64_t>>(
+                    "CLOCK_FREQ", pattern.first, cache_size, key_space_size, num_operations, pattern.second, num_threads, report_interval));
                 
                 // SIEVE
                 results_.push_back(run_multi_threaded_test<SIEVECacheManager<uint64_t, uint64_t>>(

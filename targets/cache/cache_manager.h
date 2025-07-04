@@ -92,8 +92,8 @@ private:
 
 template<typename Key, typename Value, template<typename, typename> class PolicyTemplate>
 TemplateCacheManager<Key, Value, PolicyTemplate>::TemplateCacheManager(uint64_t cache_size, bool debug)
-    : cache_size_(cache_size), used_entries_(0),
-      hits_(0), misses_(0), evictions_(0), debug_(debug) {
+    : cache_size_(cache_size), used_entries_(0), debug_(debug),
+      hits_(0), misses_(0), evictions_(0) {
     
     // Pre-allocate entries vector
     entries_.resize(cache_size);
@@ -470,6 +470,9 @@ using FIFOCacheManager = TemplateCacheManager<Key, Value, FIFO>;
 
 template<typename Key, typename Value>
 using CLOCKCacheManager = TemplateCacheManager<Key, Value, CLOCK>;
+
+template<typename Key, typename Value>
+using CLOCK_FREQCacheManager = TemplateCacheManager<Key, Value, CLOCK_FREQ>;
 
 template<typename Key, typename Value>
 using SIEVECacheManager = TemplateCacheManager<Key, Value, SIEVE>;

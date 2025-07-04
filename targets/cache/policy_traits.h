@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT or GPL-2.0-only
 
-#ifndef POLICY_TRAITS_HPP
-#define POLICY_TRAITS_HPP
+#ifndef POLICY_TRAITS_H
+#define POLICY_TRAITS_H
 
 #include <cstdint>
 #include <vector>
@@ -35,9 +35,12 @@ struct CacheEntry {
         : key(k), value(v), dirty(false), valid(true), index(idx), pin_count(0) {}
 };
 
-// Base policy interface - removed for now as we're keeping static functions
 
 // ===================== LRU Policy =====================
+// LRU (Least Recently Used) evicts the entry that was accessed least recently.
+// When an entry is accessed, it moves to the front of the list. When eviction is needed,
+// the entry at the tail (oldest) is removed. This policy works well for workloads
+// with temporal locality where recently accessed items are likely to be accessed again.
 template<typename Key, typename Value>
 class LRU {
 public:
@@ -120,6 +123,11 @@ public:
 };
 
 // ===================== LFU Policy =====================
+// LFU (Least Frequently Used) evicts the entry with the lowest access count.
+// Each entry maintains a frequency counter that increments on every access.
+// When eviction is needed, the entry with the smallest frequency is removed.
+// This policy works well for workloads where frequently accessed items should
+// stay in cache regardless of when they were last accessed.
 template<typename Key, typename Value>
 class LFU {
 public:
@@ -229,6 +237,11 @@ public:
 };
 
 // ===================== FIFO Policy =====================
+// FIFO (First In, First Out) evicts entries in the order they were inserted.
+// The policy maintains a simple queue where new entries are added at the head
+// and eviction removes from the tail. Access patterns don't affect eviction order.
+// This policy is simple and predictable but may not perform well for most workloads
+// since it doesn't consider access frequency or recency.
 template<typename Key, typename Value>
 class FIFO {
 public:
@@ -249,11 +262,11 @@ public:
     static void on_access(ManagerData&, Entry&, std::vector<Entry>&) {}
     
     static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
-        e.prev = m.tail;
-        e.next = -1;
-        if (m.tail != -1) entries[m.tail].next = e.index;
-        m.tail = e.index;
-        if (m.head == -1) m.head = e.index;
+        e.prev = -1;
+        e.next = m.head;
+        if (m.head != -1) entries[m.head].prev = e.index;
+        m.head = e.index;
+        if (m.tail == -1) m.tail = e.index;
     }
     
     static void on_remove(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
@@ -265,12 +278,12 @@ public:
     }
     
     static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
-        // FIFO: walk from head to tail
-        int idx = m.head;
+        // FIFO: walk from tail to head
+        int idx = m.tail;
         while (idx != -1) {
             Entry& entry = entries[idx];
             if (can_evict(entry)) return &entry;
-            idx = entry.next;
+            idx = entry.prev;
         }
         return nullptr;
     }
@@ -299,6 +312,11 @@ public:
 };
 
 // ===================== CLOCK Policy =====================
+// CLOCK is an approximation of LRU that uses a circular list with a reference bit.
+// Each entry has a reference bit that is set to true when accessed. During eviction,
+// the algorithm scans entries in a circular manner. If an entry's reference bit is
+// false, it is evicted. If true, the bit is cleared and the scan continues.
+// This provides LRU-like behavior with lower overhead than a true LRU implementation.
 template<typename Key, typename Value>
 class CLOCK {
 public:
@@ -411,7 +429,131 @@ public:
     }
 };
 
+// ===================== CLOCK_FREQ Policy =====================
+// CLOCK_FREQ combines CLOCK with frequency counting. Each entry maintains a frequency
+// counter that increments on access. During eviction, entries with frequency <= 1
+// are evicted immediately. Higher frequency entries have their counter decremented
+// and get another chance. This provides better performance than CLOCK for workloads
+// with varying access patterns by considering both recency and frequency.
+template<typename Key, typename Value>
+class CLOCK_FREQ {
+public:
+    struct Entry : public CacheEntry<Key, Value> {
+        int next, prev;
+        int freq;  // Frequency counter (like libCacheSim)
+        Entry() : CacheEntry<Key, Value>(), next(-1), prev(-1), freq(1) {}
+        Entry(const Key& k, const Value& v, uint32_t idx) 
+            : CacheEntry<Key, Value>(k, v, idx), next(-1), prev(-1), freq(1) {}
+    };
+    
+    struct ManagerData {
+        int hand = -1;
+        int tail = -1;  // Add tail pointer for O(1) inserts
+    };
+    
+    using EntryType = Entry;
+    using ManagerDataType = ManagerData;
+    
+    static void on_access(ManagerData&, Entry& e, std::vector<Entry>&) {
+        // Increment frequency counter (like libCacheSim)
+        if (e.freq < 255) {  // Prevent overflow, max 8-bit counter
+            e.freq++;
+        }
+    }
+    
+    static void on_insert(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        if (m.hand == -1) {
+            // First entry
+            m.hand = e.index;
+            m.tail = e.index;
+            e.next = e.index;
+            e.prev = e.index;
+        } else {
+            // Insert after tail
+            entries[m.tail].next = e.index;
+            e.prev = m.tail;
+            e.next = m.hand;
+            entries[m.hand].prev = e.index;
+            m.tail = e.index;
+        }
+    }
+    
+    static void on_remove(ManagerData& m, Entry& e, std::vector<Entry>& entries) {
+        if (e.next == e.index) {
+            // Only one entry, remove it
+            m.hand = -1;
+            m.tail = -1;
+        } else {
+            // O(1) removal using prev pointer
+            entries[e.prev].next = e.next;
+            entries[e.next].prev = e.prev;
+            // Update hand and tail pointers if needed
+            if (m.hand == (int)e.index) m.hand = e.next;
+            if (m.tail == (int)e.index) m.tail = e.prev;
+        }
+        e.next = e.prev = -1;
+    }
+    
+    static Entry* get_eviction_candidate(ManagerData& m, std::vector<Entry>& entries, const std::function<bool(const Entry&)>& can_evict) {
+        // CLOCK_FREQ: walk the clock with frequency counter - up to two full passes
+        if (m.hand == -1) return nullptr;
+        int start = m.hand;
+        int pass = 0;
+        do {
+            Entry& entry = entries[m.hand];
+            if (can_evict(entry)) {
+                if (entry.freq <= 1) {
+                    // Found a victim with frequency <= 1
+                    Entry* victim = &entry;
+                    m.hand = entry.next;
+                    return victim;
+                } else {
+                    // Decrement frequency counter and give another chance (like libCacheSim)
+                    entry.freq--;
+                }
+            }
+            m.hand = entry.next;
+            if (m.hand == start) {
+                pass++;
+                if (pass == 2) break;
+            }
+        } while (true);
+        return nullptr;
+    }
+    
+    static const char* name() { return "CLOCK_FREQ"; }
+    
+    static void print_stats(const ManagerData& m, const std::vector<Entry>& entries) {
+        // CLOCK_FREQ doesn't have policy-specific stats beyond the basic ones
+    }
+    
+    static void print_state(const ManagerData& m, const std::vector<Entry>& entries) {
+        std::cout << "  CLOCK_FREQ hand: " << (m.hand == -1 ? "none" : std::to_string(m.hand)) << "\n";
+        if (m.hand != -1) {
+            std::cout << "  CLOCK_FREQ list: ";
+            int start = m.hand;
+            int idx = start;
+            do {
+                const Entry& entry = entries[idx];
+                std::cout << entry.key << "(" << entry.pin_count << "," << (entry.dirty ? "D" : "C") << ",freq:" << entry.freq << ")";
+                if (entry.next != idx) std::cout << " -> ";
+                idx = entry.next;
+            } while (idx != start);
+            std::cout << "\n";
+        }
+    }
+    
+    static std::string get_entry_info(const Entry& entry) {
+        return ", freq: " + std::to_string(entry.freq);
+    }
+};
+
 // ===================== SIEVE Policy =====================
+// SIEVE is a simple and efficient eviction policy that uses a visited bit.
+// Each entry has a visited bit that is set to true when accessed. During eviction,
+// the algorithm scans entries in a circular manner. If an entry's visited bit is
+// false, it is evicted. If true, the bit is cleared and the scan continues.
+// SIEVE provides similar performance to CLOCK but with even simpler implementation.
 template<typename Key, typename Value>
 class SIEVE {
 public:
@@ -526,6 +668,12 @@ public:
 };
 
 // ===================== ARC Policy =====================
+// ARC (Adaptive Replacement Cache) maintains two LRU lists: T1 for recent entries
+// and T2 for frequent entries. It also uses ghost lists (B1, B2) to track recently
+// evicted entries. The policy adapts between recency and frequency based on access
+// patterns. When a ghost hit occurs, the adaptive parameter p is adjusted to favor
+// the appropriate list. ARC automatically adapts to changing access patterns and
+// typically outperforms both LRU and LFU across diverse workloads.
 template<typename Key, typename Value>
 class ARC {
 public:
@@ -707,7 +855,8 @@ using LRUPolicy = LRU<uint64_t, uint64_t>;  // For sector-based caching
 using LFUPolicy = LFU<uint64_t, uint64_t>;
 using FIFOPolicy = FIFO<uint64_t, uint64_t>;
 using CLOCKPolicy = CLOCK<uint64_t, uint64_t>;
+using CLOCK_FREQPolicy = CLOCK_FREQ<uint64_t, uint64_t>;
 using SIEVEPolicy = SIEVE<uint64_t, uint64_t>;
 using ARCPolicy = ARC<uint64_t, uint64_t>;
 
-#endif // POLICY_TRAITS_HPP 
+#endif // POLICY_TRAITS_H 

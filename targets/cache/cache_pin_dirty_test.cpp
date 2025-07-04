@@ -93,7 +93,7 @@ void test_basic_pin_unpin() {
     
     if (verbose) std::cout << "Operation: cache.lookup(1, value)" << std::endl;
     int value;
-    bool found = cache.lookup(1, value);
+    (void)cache.lookup(1, value);  // Check if item 1 is still in cache (result not used)
     cache.print_state();
     std::cout << std::flush;
     if (verbose) cache.print_state();
@@ -185,7 +185,7 @@ void test_multiple_pins() {
     
     if (verbose) std::cout << "Operation: cache.lookup(1, value)" << std::endl;
     int value;
-    bool found = cache.lookup(1, value);
+    (void)cache.lookup(1, value);  // Check if item 1 is still in cache (result not used)
     if (verbose) cache.print_state();
     // Note: CLOCK policy may not evict key 1 specifically, but some unpinned item should be evicted
     assert(cache.get_used_entries() <= 2);  // Cache size should be maintained
@@ -928,11 +928,12 @@ void run_tests(int index = 0) {
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [cache_type] [test_number]\n";
     std::cout << "Cache types:\n";
-    std::cout << "  all   - All cache types (LRU, LFU, FIFO, CLOCK, SIEVE, ARC)\n";
+    std::cout << "  all   - All cache types (LRU, LFU, FIFO, CLOCK, CLOCK_FREQ, SIEVE, ARC)\n";
     std::cout << "  lru   - LRU Cache\n";
     std::cout << "  lfu   - LFU Cache\n";
     std::cout << "  fifo  - FIFO Cache\n";
     std::cout << "  clock - CLOCK Cache\n";
+    std::cout << "  clock_freq - CLOCK_FREQ Cache\n";
     std::cout << "  sieve - SIEVE Cache\n";
     std::cout << "  arc   - ARC Cache\n";
     std::cout << "\nTest numbers:\n";
@@ -988,6 +989,8 @@ int main(int argc, char* argv[]) {
             run_tests<FIFOCacheManager<int, int>>(test_number);
             TestLogger::log("Testing CLOCK Cache...");
             run_tests<CLOCKCacheManager<int, int>>(test_number);
+            TestLogger::log("Testing CLOCK_FREQ Cache...");
+            run_tests<CLOCK_FREQCacheManager<int, int>>(test_number);
             TestLogger::log("Testing SIEVE Cache...");
             run_tests<SIEVECacheManager<int, int>>(test_number);
             TestLogger::log("Testing ARC Cache...");
@@ -1000,6 +1003,8 @@ int main(int argc, char* argv[]) {
             run_tests<FIFOCacheManager<int, int>>(test_number);
         } else if (cache_type == "clock") {
             run_tests<CLOCKCacheManager<int, int>>(test_number);
+        } else if (cache_type == "clock_freq") {
+            run_tests<CLOCK_FREQCacheManager<int, int>>(test_number);
         } else if (cache_type == "sieve") {
             run_tests<SIEVECacheManager<int, int>>(test_number);
         } else if (cache_type == "arc") {
