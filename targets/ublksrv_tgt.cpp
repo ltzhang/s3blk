@@ -111,7 +111,7 @@ static void ublksrv_drain_fetch_commands(const struct ublksrv_dev *dev,
 	const struct ublksrv_ctrl_dev_info *dinfo =
 		ublksrv_ctrl_get_dev_info(ublksrv_get_ctrl_dev(dev));
 	unsigned nr_queues = dinfo->nr_hw_queues;
-	int i;
+	unsigned i;
 	void *ret;
 
 	for (i = 0; i < nr_queues; i++)
@@ -362,12 +362,14 @@ static int ublksrv_parse_add_opts(struct ublksrv_dev_data *data, int *efd, int a
 		{ "unprivileged",	0,	NULL, 0},
 		{ "usercopy",	0,	NULL, 0},
 		{ "eventfd",	1,	NULL, 0},
+		{ "max_io_buf_bytes",	1,	NULL, 0},
 		{ "zerocopy",	0,	NULL, 'z'},
 		{ NULL }
 	};
 
 	data->queue_depth = DEF_QD;
 	data->nr_hw_queues = DEF_NR_HW_QUEUES;
+	data->max_io_buf_bytes = DEF_BUF_SIZE;
 	data->dev_id = -1;
 	data->run_dir = ublksrv_get_pid_dir();
 
@@ -415,11 +417,12 @@ static int ublksrv_parse_add_opts(struct ublksrv_dev_data *data, int *efd, int a
 				data->flags |= UBLK_F_USER_COPY;
 			if (!strcmp(longopts[option_index].name, "eventfd") && efd)
 				*efd = strtol(optarg, NULL, 10);
+			if (!strcmp(longopts[option_index].name, "max_io_buf_bytes"))
+				data->max_io_buf_bytes = strtol(optarg, NULL, 10);
 			break;
 		}
 	}
 
-	data->max_io_buf_bytes = DEF_BUF_SIZE;
 	if (data->nr_hw_queues > MAX_NR_HW_QUEUES)
 		data->nr_hw_queues = MAX_NR_HW_QUEUES;
 	if (data->queue_depth > MAX_QD)
@@ -539,8 +542,8 @@ static char *ublksrv_pop_cmd(int *argc, char *argv[])
 		return NULL;
 	}
 
-	memmove(&argv[1], &argv[2], *argc * sizeof(argv[0]));
 	(*argc)--;
+	memmove(&argv[1], &argv[2], *argc * sizeof(argv[0]));
 
 	return cmd;
 }
@@ -601,7 +604,7 @@ static int __cmd_dev_user_recover(const struct ublksrv_tgt_type *tgt_type,
 		goto fail;
 	}
 
-	if (dev_info.dev_id != number) {
+	if (dev_info.dev_id != (unsigned)number) {
 		fprintf(stderr, "dev id doesn't match read %d for dev %d\n",
 				dev_info.dev_id, number);
 		goto fail;

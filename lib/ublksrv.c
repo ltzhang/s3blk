@@ -241,7 +241,7 @@ static inline int __ublksrv_queue_event(struct _ublksrv_queue *q)
 {
 	if (q->efd >= 0) {
 		struct io_uring_sqe *sqe;
-		__u64 user_data = build_eventfd_data();
+		__u64 user_data = build_internal_data(UBLK_IO_OP_EVENTFD);
 
 		if (q->state & UBLKSRV_QUEUE_STOPPING)
 			return -EINVAL;
@@ -391,6 +391,15 @@ void ublksrv_queue_deinit(const struct ublksrv_queue *tq)
 	if (q->dev->tgt.ops->deinit_queue)
 		q->dev->tgt.ops->deinit_queue(tq);
 
+	if (q->epollfd >= 0)
+		close(q->epollfd);
+	while (q->epoll_callbacks) {
+		struct epoll_cb_data *next = q->epoll_callbacks->next;
+
+		free(q->epoll_callbacks);
+		q->epoll_callbacks = next;
+	}
+
 	if (q->efd >= 0)
 		close(q->efd);
 
@@ -449,6 +458,126 @@ static void ublksrv_set_sched_affinity(struct _ublksrv_dev *dev,
 	if (sched_setaffinity(0, sizeof(cpu_set_t), cpuset) < 0)
 		ublk_err("ublk dev %u queue %u set affinity failed",
 				dev_id, q_id);
+}
+
+static int ublksrv_prep_epoll_sqe(struct _ublksrv_queue *q)
+{
+	__u64 user_data = build_internal_data(UBLK_IO_OP_EPOLLFD);
+	struct io_uring_sqe *sqe = ublksrv_alloc_sqe(&q->ring);
+
+	if (!sqe) {
+		ublk_err("%s: queue %d run out of sqe\n",
+			 __func__, q->q_id);
+		return -1;
+	}
+
+	io_uring_prep_poll_multishot(sqe, q->epollfd, POLLIN);
+	io_uring_sqe_set_data64(sqe, user_data);
+	return 0;
+}
+
+static int ublksrv_setup_epollfd(struct _ublksrv_queue *q)
+{
+	const struct ublksrv_ctrl_dev_info *info = &q->dev->ctrl_dev->dev_info;
+
+	if (q->dev->tgt.tgt_ring_depth == 0) {
+		ublk_err("ublk dev %d queue %d zero tgt queue depth",
+			info->dev_id, q->q_id);
+		return -EINVAL;
+	}
+
+	q->epollfd = epoll_create1(0);
+	if (q->epollfd < 0)
+		return -errno;
+
+	return ublksrv_prep_epoll_sqe(q);
+}
+
+#define EPOLL_MAX_EVENTS 8
+static void ublkdrv_process_epollfd(struct _ublksrv_queue *q, struct io_uring_cqe *cqe)
+{
+	struct epoll_event *e, events[EPOLL_MAX_EVENTS];
+	int num_events;
+
+	num_events = epoll_wait(q->epollfd, events, EPOLL_MAX_EVENTS, 0);
+	e = events;
+	while (num_events--) {
+		struct epoll_cb_data *ecb = (struct epoll_cb_data *)e->data.u64;
+
+		ecb->cb((struct ublksrv_queue *)q, e->events);
+		e++;
+	}
+
+	if (cqe->flags & IORING_CQE_F_MORE)
+		return;
+
+	ublksrv_prep_epoll_sqe(q);
+	io_uring_submit_and_wait(&q->ring, 0);
+	return;
+}
+
+int ublksrv_epoll_mod_fd(struct ublksrv_queue *tq, int fd, int events)
+{
+	struct _ublksrv_queue *q = tq_to_local(tq);
+	struct epoll_cb_data *ecd = q->epoll_callbacks;
+	int ret = -1;
+
+	pthread_spin_lock(&q->epoll_lock);
+	while (ecd) {
+		if (ecd->fd == fd) {
+			struct epoll_event event;
+			event.events = events;
+			event.data.u64 = (uintptr_t)ecd;
+
+			ret = epoll_ctl(q->epollfd, EPOLL_CTL_MOD, fd, &event);
+			if (ret)
+				ublk_err("Failed to add file descriptor to epoll\n");
+			goto out;
+		}
+		ecd = ecd->next;
+	}
+ out:
+	pthread_spin_unlock(&q->epoll_lock);
+	return ret;
+}
+
+int ublksrv_epoll_add_fd(struct ublksrv_queue *tq, int fd, int events, epoll_cb cb)
+{
+	struct _ublksrv_queue *q = tq_to_local(tq);
+	struct epoll_event event;
+	struct epoll_cb_data *ecd;
+	int ret = -1;
+
+	pthread_spin_lock(&q->epoll_lock);
+	if (q->epollfd == -1) {
+		if (ublksrv_setup_epollfd(q) < 0) {
+			ublk_err("ublk dev %d queue %d setup pollfd failed: %s",
+				 q->dev->ctrl_dev->dev_info.dev_id, q->q_id,
+				 strerror(-ret));
+			goto out;
+		}
+	}
+
+	ecd = calloc(1, sizeof(struct epoll_cb_data));
+	if (!ecd) {
+		ublk_err("failed to allocate epoll_cb_data\n");
+		goto out;
+	}
+	ecd->fd           = fd;
+	ecd->cb           = cb;
+	ecd->next         = q->epoll_callbacks;
+	q->epoll_callbacks = ecd;
+
+	event.events = events;
+	event.data.u64 = (uintptr_t)ecd;
+
+	ret = epoll_ctl(q->epollfd, EPOLL_CTL_ADD, fd, &event);
+	if (ret)
+		ublk_err("Failed to add file descriptor to epoll\n");
+
+ out:
+	pthread_spin_unlock(&q->epoll_lock);
+	return ret;
 }
 
 static void ublksrv_kill_eventfd(struct _ublksrv_queue *q)
@@ -574,6 +703,10 @@ const struct ublksrv_queue *ublksrv_queue_init_flags(const struct ublksrv_dev *t
 	q = (struct _ublksrv_queue *)malloc(sizeof(struct _ublksrv_queue) +
 			sizeof(struct ublk_io) * nr_ios);
 	dev->__queues[q_id] = q;
+
+	q->epollfd = -1;
+	q->epoll_callbacks = NULL;
+	pthread_spin_init(&q->epoll_lock, PTHREAD_PROCESS_PRIVATE);
 
 	q->tgt_ops = dev->tgt.ops;	//cache ops for fast path
 	q->dev = dev;
@@ -836,9 +969,16 @@ static inline void ublksrv_handle_tgt_cqe(struct _ublksrv_queue *q,
 			user_data_to_op(cqe->user_data));
 	}
 
-	if (is_eventfd_io(cqe->user_data)) {
-		if (q->tgt_ops->handle_event)
-			q->tgt_ops->handle_event(local_to_tq(q));
+	if (is_internal_io(cqe->user_data)) {
+		switch ((cqe->user_data >> 16) & 0xff) {
+		case UBLK_IO_OP_EVENTFD:
+			if (q->tgt_ops->handle_event)
+				q->tgt_ops->handle_event(local_to_tq(q));
+			return;
+		case UBLK_IO_OP_EPOLLFD:
+			ublkdrv_process_epollfd(q, cqe);
+			return;
+		}
 	} else {
 		if (q->tgt_ops->tgt_io_done)
 			q->tgt_ops->tgt_io_done(local_to_tq(q),
@@ -860,7 +1000,7 @@ static void ublksrv_handle_cqe(struct io_uring *r,
 			__func__, cqe->res, q->q_id, tag, cmd_op,
 			is_target_io(cqe->user_data),
 			user_data_to_tgt_data(cqe->user_data),
-			is_eventfd_io(cqe->user_data),
+			is_internal_io(cqe->user_data),
 			(q->state & UBLKSRV_QUEUE_STOPPING));
 
 	/* Don't retrieve io in case of target io */

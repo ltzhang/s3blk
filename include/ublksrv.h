@@ -333,6 +333,12 @@ struct ublksrv_tgt_type {
 	unsigned long reserved[5];
 };
 
+/*
+ * UBLK_IO_OP range 0xe0 - 0xef is reserved for builtin/internal use.
+ */
+#define		UBLK_IO_OP_EVENTFD		0xe0
+#define 	UBLK_IO_OP_EPOLLFD              0xe1
+
 /**
  * Build sqe->user_data.
  *
@@ -352,7 +358,7 @@ static inline __u64 build_user_data(unsigned tag, unsigned op,
 {
 	assert(!(tag >> 16) && !(op >> 8) && !(tgt_data >> 16));
 
-	return tag | (op << 16) | (tgt_data << 24) | (__u64)is_target_io << 63;
+	return tag | (op << 16) | ((__u64)tgt_data << 24) | (__u64)is_target_io << 63;
 }
 
 static inline unsigned int user_data_to_tag(__u64 user_data)
@@ -1157,6 +1163,22 @@ extern int ublksrv_complete_io(const struct ublksrv_queue *q, unsigned tag, int 
 extern int ublksrv_queue_reap_events(const struct ublksrv_queue *tq);
 
 /** @} */ // end of ublksrv_queue group
+
+typedef  void (*epoll_cb)(struct ublksrv_queue *q, int revents);
+
+/**
+ * Register a file descriptor to the queue's epoll event-loop.
+ *
+ * The provided callback will execute in the same context and event-loop as
+ * the queue uses for its communication with the ublk kernel module.
+ * It is thus very important that this callback will never block.
+ */
+int ublksrv_epoll_add_fd(struct ublksrv_queue *q, int fd, int events, epoll_cb cb);
+
+/**
+ * Modify a registered file descriptor.
+ */
+int ublksrv_epoll_mod_fd(struct ublksrv_queue *q, int fd, int events);
 
 #ifdef __cplusplus
 }

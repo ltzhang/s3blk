@@ -99,6 +99,12 @@ struct ublk_io {
 	struct ublk_io_data  data;
 };
 
+struct epoll_cb_data {
+	struct epoll_cb_data *next;
+	int fd;
+	epoll_cb cb;
+};
+
 struct _ublksrv_queue {
 	/********** part of API, can't change ************/
 	int q_id;
@@ -123,6 +129,10 @@ struct _ublksrv_queue {
 
 	unsigned cmd_inflight, tgt_io_inflight;	//obsolete
 	unsigned state;
+
+	int epollfd;
+	struct epoll_cb_data *epoll_callbacks;
+	pthread_spinlock_t epoll_lock;
 
 	/* eventfd */
 	int efd;
@@ -223,13 +233,20 @@ int create_pid_file(const char *pid_file, int *pid_fd);
 
 extern void ublksrv_build_cpu_str(char *buf, int len, const cpu_set_t *cpuset);
 
-/* bit63: target io, bit62: eventfd data */
-static inline __u64 build_eventfd_data()
+/*
+ * bit63: target io, bit62: internal data.
+ *
+ * Internal data is a flag to indicate that this is a SQE used for
+ * internal purposes in ublksrv. I.e. eventfd or epollfd management.
+ */
+static inline __u64 build_internal_data(unsigned op)
 {
-	return 0x3ULL << 62;
+	assert(!(op >> 8));
+
+	return (op << 16) | (0x3ULL << 62);
 }
 
-static inline int is_eventfd_io(__u64 user_data)
+static inline int is_internal_io(__u64 user_data)
 {
 	return (user_data & (1ULL << 62)) != 0;
 }
