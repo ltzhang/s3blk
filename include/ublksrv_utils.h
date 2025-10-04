@@ -32,6 +32,7 @@ static inline void ublksrv_log(int priority, const char *fmt, ...)
 
     va_start(ap, fmt);
     vsyslog(priority, fmt, ap);
+    va_end(ap);
 }
 
 static inline void ublksrv_printf(FILE *stream, const char *fmt, ...)
@@ -40,6 +41,7 @@ static inline void ublksrv_printf(FILE *stream, const char *fmt, ...)
 
     va_start(ap, fmt);
     vfprintf(stream, fmt, ap);
+    va_end(ap);
 }
 #else
 static inline void ublksrv_log(int priority, const char *fmt, ...) { }
@@ -58,14 +60,13 @@ extern void ublk_dbg(int level, const char *fmt, ...)
 	__attribute__ ((format (printf, 2, 3)));
 extern void ublk_ctrl_dbg(int level, const char *fmt, ...)
 	__attribute__ ((format (printf, 2, 3)));
-extern void ublk_set_debug_mask(unsigned mask);
-extern unsigned ublk_get_debug_mask(unsigned mask);
 #else
 static inline void ublk_dbg(int level, const char *fmt, ...) { }
 static inline void ublk_ctrl_dbg(int level, const char *fmt, ...) { }
-static inline void ublk_set_debug_mask(unsigned mask) {}
-static inline unsigned ublk_get_debug_mask(unsigned mask) { return 0;}
 #endif
+
+extern void ublk_set_debug_mask(unsigned mask);
+extern unsigned ublk_get_debug_mask(unsigned mask);
 
 extern void ublk_log(const char *fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));

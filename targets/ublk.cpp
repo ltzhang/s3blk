@@ -2,9 +2,20 @@
 
 #include "config.h"
 #include "ublksrv_tgt.h"
+#include <filesystem>
 #include <sys/eventfd.h>
 
 static int list_one_dev(int number, bool log, bool verbose);
+
+template<typename cb_t>
+static void for_each_dev(cb_t && cb)
+{
+	for (auto & entry : std::filesystem::directory_iterator("/sys/class/ublk-char")) {
+		unsigned dev_id;
+		if (sscanf(entry.path().filename().c_str(), "ublkc%u", &dev_id) == 1)
+			cb(dev_id);
+	}
+}
 
 /*
  * returns 0 on success and -errno on failure
@@ -163,7 +174,7 @@ static int cmd_dev_del(int argc, char *argv[])
 		{ NULL }
 	};
 	int number = -1;
-	int opt, ret, i;
+	int opt, ret = 0;
 	unsigned async = 0;
 	int option_index = 0;
 
@@ -185,11 +196,10 @@ static int cmd_dev_del(int argc, char *argv[])
 	if (number >= 0)
 		return __cmd_dev_del(number, true, async);
 
-	for (i = 0; i < MAX_NR_UBLK_DEVS; i++) {
-		ret = __cmd_dev_del(i, false, async);
-		if (ret == -EOPNOTSUPP)
-			return ret;
-	}
+	for_each_dev([&](unsigned dev_id) {
+		if (ret != -EOPNOTSUPP)
+			ret = __cmd_dev_del(dev_id, false, async);
+	});
 
 	return ret;
 }
@@ -289,7 +299,7 @@ static int cmd_list_dev_info(int argc, char *argv[])
 		{ NULL }
 	};
 	int number = -1;
-	int opt, i;
+	int opt, ret = 0;
 	bool verbose = false;
 
 	while ((opt = getopt_long(argc, argv, "n:v",
@@ -307,12 +317,10 @@ static int cmd_list_dev_info(int argc, char *argv[])
 	if (number >= 0)
 		return list_one_dev(number, true, verbose);
 
-	for (i = 0; i < MAX_NR_UBLK_DEVS; i++) {
-		int ret = list_one_dev(i, false, verbose);
-
-		if (ret == -EOPNOTSUPP)
-			return ret;
-	}
+	for_each_dev([&](unsigned dev_id) {
+		if (ret != -EOPNOTSUPP)
+			ret = list_one_dev(dev_id, false, verbose);
+	});
 
 	return 0;
 }

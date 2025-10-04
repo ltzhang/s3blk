@@ -54,6 +54,7 @@ void ublk_err(const char *fmt, ...)
 
 	va_start(ap, fmt);
 	vsyslog(LOG_ERR, fmt, ap);
+	va_end(ap);
 }
 
 void ublk_log(const char *fmt, ...)
@@ -62,6 +63,7 @@ void ublk_log(const char *fmt, ...)
 
 	va_start(ap, fmt);
 	vsyslog(LOG_INFO, fmt, ap);
+	va_end(ap);
 }
 
 #ifdef DEBUG
@@ -73,6 +75,7 @@ void ublk_dbg(int level, const char *fmt, ...)
 
 		va_start(ap, fmt);
 		vsyslog(LOG_ERR, fmt, ap);
+		va_end(ap);
 	}
 }
 
@@ -83,6 +86,7 @@ void ublk_ctrl_dbg(int level, const char *fmt, ...)
 
 		va_start(ap, fmt);
 		vfprintf(stdout, fmt, ap);
+		va_end(ap);
 	}
 }
 
@@ -94,6 +98,15 @@ void ublk_set_debug_mask(unsigned mask)
 unsigned ublk_get_debug_mask(unsigned mask)
 {
 	return ublk_debug_mask;
+}
+#else
+void ublk_set_debug_mask(unsigned mask)
+{
+}
+
+unsigned ublk_get_debug_mask(unsigned mask)
+{
+	return 0;
 }
 #endif
 
