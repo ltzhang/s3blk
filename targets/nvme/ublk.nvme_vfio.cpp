@@ -1374,17 +1374,21 @@ static inline void nvme_sq_submit_cmd(struct nvme_queue *nvmeq)
 	if (++nvmeq->sq_tail == nvmeq->qsize)
 		nvmeq->sq_tail = 0;
 
-	/* Flush when batch reaches 32 or SQ is full */
+	/* Batch up to 32 submissions before ringing the doorbell */
 	pending = (nvmeq->sq_tail + nvmeq->qsize - nvmeq->last_sq_tail)
 		  % nvmeq->qsize;
-	if (pending < 32) {
-		next_tail = nvmeq->sq_tail + 1;
-		if (next_tail == nvmeq->qsize)
-			next_tail = 0;
-		if (next_tail != nvmeq->last_sq_tail)
-			return;
-	}
+	if (pending >= 32)
+		goto flush;
 
+	/* Also flush if SQ is about to be full */
+	next_tail = nvmeq->sq_tail + 1;
+	if (next_tail == nvmeq->qsize)
+		next_tail = 0;
+	if (next_tail == nvmeq->last_sq_tail)
+		goto flush;
+
+	return;
+flush:
 	nvme_sq_flush(nvmeq);
 }
 
@@ -2103,6 +2107,7 @@ static int nvme_vfio_setup(struct nvme_vfio_tgt_data *data)
 			  MAP_SHARED, data->device_fd, region_info.offset);
 	if (data->bar0 == MAP_FAILED) {
 		ublk_err("mmap BAR0: %s\n", strerror(errno));
+		data->bar0 = NULL;
 		return -1;
 	}
 
@@ -2175,7 +2180,7 @@ static int nvme_vfio_init_tgt(struct ublksrv_dev *dev, int type, int argc, char 
 	    info->max_io_buf_bytes > hps ||
 	    (info->max_io_buf_bytes & (info->max_io_buf_bytes - 1))) {
 		ublk_err("max_io_buf_bytes %u invalid (must be power of 2, %u-%u)\n",
-			 info->max_io_buf_bytes, PAGE_SIZE, 32 << 20);
+			 info->max_io_buf_bytes, PAGE_SIZE, 2 << 20);
 		return -EINVAL;
 	}
 
